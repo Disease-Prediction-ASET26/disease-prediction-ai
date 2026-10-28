@@ -6,9 +6,8 @@ from .classifier import ClassifierStrategy, KNNStrategy, RandomForestStrategy
 
 
 class ModelFactory(ABC):
-
     @abstractmethod
-    def create_classifier(self) -> ClassifierStrategy:        ...
+    def create_classifier(self) -> ClassifierStrategy: ...
 
 
 class RandomForestFactory(ModelFactory):
