@@ -4,9 +4,11 @@ on:
   push:
     branches:
     - main
+    - develop
   pull_request:
     branches:
     - main
+    - develop
     types:
     - opened
     - synchronize
@@ -150,7 +152,7 @@ jobs:
       build-artifact: ''
   ci:
     if: ${{ always() && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name ==
-      github.repository) && github.event.action != 'closed') }}
+      github.repository || github.event.pull_request.base.ref == 'main') && github.event.action != 'closed') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs:
@@ -163,6 +165,18 @@ jobs:
     - owasp
     - containerize
     steps:
+    - name: Require develop promotion to main
+      env:
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        EVENT_NAME: ${{ github.event_name }}
+        HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        REPOSITORY: ${{ github.repository }}
+      run: |
+        if [[ "$EVENT_NAME" == "pull_request" && "$BASE_REF" == "main" && ( "$HEAD_REF" != "develop" || "$HEAD_REPO" != "$REPOSITORY" ) ]]; then
+          echo "::error::PRs into main must come from this repository's develop branch."
+          exit 1
+        fi
     - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
       with:
         needs: ${{ toJSON(needs) }}
