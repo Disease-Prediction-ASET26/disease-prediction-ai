@@ -1,0 +1,175 @@
+# Activation: https://github.com/Disease-Prediction-ASET26/disease-prediction-ci/blob/main/README.md
+name: CI
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  workflow-lint:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+  lint:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.13'
+        cache: pip
+        cache-dependency-path: requirements.txt
+    - run: |
+        python -m pip install ruff==0.17.3
+        ruff check --isolated prediction_service
+  build:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.13'
+        cache: pip
+        cache-dependency-path: requirements.txt
+    - run: |
+        python -m compileall -q prediction_service
+        echo "Python compilation check only. Service packaging and API entrypoint remain unconfigured." >> "$GITHUB_STEP_SUMMARY"
+  unit-test:
+    if: ${{ ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed') && false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - run: |
+        echo "::error::Add a real unit test suite and replace the disabled command."
+        exit 1
+  integration-test:
+    if: ${{ ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed') && false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - run: |
+        echo "::error::Add integration tests and the command to run them."
+        exit 1
+  sonarqube:
+    if: ${{ ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed') && (vars.SONAR_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs:
+    - build
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Require SonarQube configuration
+      env:
+        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        test -n "$SONAR_HOST_URL"
+        test -n "$SONAR_PROJECT_KEY"
+        test -n "$SONAR_TOKEN"
+    - uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+      env:
+        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      with:
+        args: |
+          -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+          -Dsonar.sources=prediction_service
+          -Dsonar.qualitygate.wait=true
+          -Dsonar.python.coverage.reportPaths=coverage.xml
+  owasp:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed' }}
+    needs:
+    - build
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    permissions:
+      contents: read
+      packages: read
+    with:
+      ecosystem: python
+      build-artifact: ''
+  containerize:
+    name: containerize / scan
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+      == github.repository) && github.event.action != 'closed') && vars.CONTAINER_ENABLED == 'true' && !contains(needs.*.result,
+      'failure') && !contains(needs.*.result, 'cancelled') && needs['workflow-lint'].result == 'success' && needs['lint'].result
+      == 'success' && needs['build'].result == 'success' && needs['owasp'].result == 'success' && (!(vars.SONAR_ENABLED
+      == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || needs.sonarqube.result
+      == 'success') }}
+    needs:
+    - workflow-lint
+    - lint
+    - build
+    - unit-test
+    - integration-test
+    - sonarqube
+    - owasp
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    with:
+      build-artifact: ''
+  ci:
+    if: ${{ always() && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name ==
+      github.repository) && github.event.action != 'closed') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+    - workflow-lint
+    - lint
+    - build
+    - unit-test
+    - integration-test
+    - sonarqube
+    - owasp
+    - containerize
+    steps:
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+      with:
+        needs: ${{ toJSON(needs) }}
+        disabled: '{"unit-test": "Add a real unit test suite and replace the disabled command.", "integration-test":
+          "Add integration tests and the command to run them.", "sonarqube": "Main-only. Configure SONAR_HOST_URL,
+          SONAR_PROJECT_KEY, SONAR_TOKEN and enable SONAR_ENABLED.", "containerize": "Supply a root Dockerfile,
+          then enable CONTAINER_ENABLED. Containerize and scan run together."}'
+        enabled: ${{ format('["{0}","{1}"]', (vars.SONAR_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+          github.event_name != 'pull_request') && 'sonarqube' || '', vars.CONTAINER_ENABLED == 'true' && 'containerize'
+          || '') }}
