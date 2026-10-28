@@ -6,26 +6,21 @@ from .models import DiseasePrediction, SymptomEntryDTO
 
 
 class ClassifierStrategy(ABC):
-
     @abstractmethod
-    def classify(self, entries: list[SymptomEntryDTO]) -> list[DiseasePrediction]:
-        ...
+    def classify(self, entries: list[SymptomEntryDTO]) -> list[DiseasePrediction]: ...
 
 
 class RandomForestStrategy(ClassifierStrategy):
-
     def classify(self, entries: list[SymptomEntryDTO]) -> list[DiseasePrediction]:
         raise NotImplementedError
 
 
 class KNNStrategy(ClassifierStrategy):
-
     def classify(self, entries: list[SymptomEntryDTO]) -> list[DiseasePrediction]:
         raise NotImplementedError
 
 
 class DiseaseClassifier:
-
     def __init__(self, strategy: ClassifierStrategy) -> None:
         self._strategy = strategy
 
