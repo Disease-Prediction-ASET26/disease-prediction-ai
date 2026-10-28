@@ -1,0 +1,22 @@
+# Activation: https://github.com/Disease-Prediction-ASET26/disease-prediction-ci/blob/main/README.md
+name: Preview cleanup
+on:
+  pull_request:
+    branches:
+    - main
+    types:
+    - closed
+  schedule:
+  - cron: 47 3 * * *
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+      }}
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/preview-cleanup.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
