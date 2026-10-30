@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from .models import Severity, SymptomEntryDTO
@@ -99,14 +99,14 @@ class ClinicalBertExtractor:
         *,
         keep_labels: Sequence[str] = ("problem",),
         min_score: float = 0.5,
-        pipeline: object | None = None,
+        pipeline: Any = None,
     ) -> None:
         self.model_name = model_name
         self.keep_labels = {label.lower() for label in keep_labels}
         self.min_score = min_score
         self._pipeline = pipeline
 
-    def _get_pipeline(self) -> object:
+    def _get_pipeline(self) -> Any:
         if self._pipeline is None:
             from transformers import (
                 AutoModelForTokenClassification,
@@ -153,12 +153,12 @@ class NegspacyNegationDetector:
         self,
         spacy_model: str = "en_ner_bc5cdr_md",
         *,
-        nlp: object | None = None,
+        nlp: Any = None,
     ) -> None:
         self.spacy_model = spacy_model
         self._nlp = nlp
 
-    def _get_nlp(self) -> object:
+    def _get_nlp(self) -> Any:
         if self._nlp is None:
             import spacy
             from negspacy.negation import Negex  # noqa: F401
@@ -240,7 +240,7 @@ class SemanticEntityLinker:
         model_name: str = "all-MiniLM-L6-v2",
         semantic_threshold: float = 0.45,
         fuzzy_threshold: float = 70.0,
-        model: object | None = None,
+        model: Any = None,
     ) -> None:
         self.vocabulary = tuple(vocabulary)
         self.normalised = [normalise_symptom(s) for s in self.vocabulary]
@@ -248,9 +248,9 @@ class SemanticEntityLinker:
         self.semantic_threshold = semantic_threshold
         self.fuzzy_threshold = fuzzy_threshold
         self._model = model
-        self._vocab_embeddings: object | None = None
+        self._vocab_embeddings: Any = None
 
-    def _get_model(self) -> object | None:
+    def _get_model(self) -> Any:
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -259,7 +259,7 @@ class SemanticEntityLinker:
             self._model = SentenceTransformer(self.model_name)
         return self._model
 
-    def _get_vocab_embeddings(self, model: object) -> object:
+    def _get_vocab_embeddings(self, model: Any) -> Any:
         if self._vocab_embeddings is None:
             self._vocab_embeddings = model.encode(
                 self.normalised,
@@ -287,7 +287,7 @@ class SemanticEntityLinker:
                 return semantic
         return self._fuzzy_match(phrase)
 
-    def _semantic_match(self, model: object, phrase: str) -> LinkedSymptom | None:
+    def _semantic_match(self, model: Any, phrase: str) -> LinkedSymptom | None:
         from sentence_transformers import util
 
         query = model.encode(
