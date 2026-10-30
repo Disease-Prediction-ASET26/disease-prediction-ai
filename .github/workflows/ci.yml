@@ -31,6 +31,12 @@ jobs:
       with:
         persist-credentials: false
     - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+  secret-scan:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.event.action != 'closed' }}
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/secret-scan.yml@76e94bd640d92a3ffbf20e9cd5914e22b5ca40cd # shared secret scan
+    permissions:
+      contents: read
   lint:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
@@ -132,11 +138,12 @@ jobs:
     if: ${{ !cancelled() && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
       == github.repository) && github.event.action != 'closed') && vars.CONTAINER_ENABLED == 'true' && !contains(needs.*.result,
       'failure') && !contains(needs.*.result, 'cancelled') && needs['workflow-lint'].result == 'success' && needs['lint'].result
-      == 'success' && needs['build'].result == 'success' && needs['owasp'].result == 'success' && (!(vars.SONAR_ENABLED
+      == 'success' && needs['secret-scan'].result == 'success' && needs['build'].result == 'success' && needs['owasp'].result == 'success' && (!(vars.SONAR_ENABLED
       == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || needs.sonarqube.result
       == 'success') }}
     needs:
     - workflow-lint
+    - secret-scan
     - lint
     - build
     - unit-test
@@ -157,6 +164,7 @@ jobs:
     timeout-minutes: 5
     needs:
     - workflow-lint
+    - secret-scan
     - lint
     - build
     - unit-test
@@ -184,6 +192,6 @@ jobs:
           "Add integration tests and the command to run them.", "sonarqube": "Main-only. Configure SONAR_HOST_URL,
           SONAR_PROJECT_KEY, SONAR_TOKEN and enable SONAR_ENABLED.", "containerize": "Supply a root Dockerfile,
           then enable CONTAINER_ENABLED. Containerize and scan run together."}'
-        enabled: ${{ format('["{0}","{1}"]', (vars.SONAR_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
+        enabled: ${{ format('["secret-scan","{0}","{1}"]', (vars.SONAR_ENABLED == 'true' && github.ref == 'refs/heads/main' &&
           github.event_name != 'pull_request') && 'sonarqube' || '', vars.CONTAINER_ENABLED == 'true' && 'containerize'
           || '') }}
