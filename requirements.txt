@@ -1,4 +1,45 @@
+# Full dependency set for the disease-prediction service, including the
+# free-text symptom parser (prediction_service.parser).
+#
+# Install everything in one shot:
+#     pip install -r requirements.txt
+#
+# Then install the scispaCy NER model, which is NOT on PyPI:
+#     pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+
+# ---------------------------------------------------------------------------
+# Core service (API + classifier)
+# ---------------------------------------------------------------------------
 fastapi==0.162.0
 uvicorn==0.54.0
 scikit-learn==1.9.1
 pydantic==2.14.1
+
+# ---------------------------------------------------------------------------
+# Step 1 -- ClinicalBERT NER (token classification)
+# ---------------------------------------------------------------------------
+transformers==4.57.1
+torch==2.9.0
+
+# ---------------------------------------------------------------------------
+# Step 2 -- Negation detection (NegEx)
+# ---------------------------------------------------------------------------
+# scispaCy pins spaCy to >=3.7,<3.8, so spaCy, scispaCy, negspacy and the model
+# wheel above must all agree. negspacy 1.1.0 requires spaCy>=3.8 and therefore
+# CONFLICTS with scispaCy; 1.0.4 is the last release that supports spaCy 3.7.
+# Do not bump spaCy past 3.7 or negspacy to 1.1+ without replacing scispaCy.
+spacy==3.7.5
+scispacy==0.5.5
+negspacy==1.0.4
+
+# ---------------------------------------------------------------------------
+# Step 3 -- Entity linking (semantic similarity + lexical fallback)
+# ---------------------------------------------------------------------------
+sentence-transformers==3.3.1
+rapidfuzz==3.10.1
+
+# ---------------------------------------------------------------------------
+# Test suite
+# ---------------------------------------------------------------------------
+pytest==8.3.4
+pytest-cov==6.0.0
