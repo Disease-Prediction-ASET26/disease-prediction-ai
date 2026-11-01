@@ -30,7 +30,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@95b512aab16b1a9012d42d705bbddfd36e8e02f3 # suppression support
   secret-scan:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
@@ -48,7 +48,7 @@ jobs:
         persist-credentials: false
     - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
-        python-version: '3.13'
+        python-version: '3.12'
         cache: pip
         cache-dependency-path: requirements.txt
     - run: |
@@ -65,7 +65,7 @@ jobs:
         persist-credentials: false
     - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
-        python-version: '3.13'
+        python-version: '3.12'
         cache: pip
         cache-dependency-path: requirements.txt
     - run: |
@@ -126,7 +126,7 @@ jobs:
       && github.event.action != 'closed' }}
     needs:
     - build
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@95b512aab16b1a9012d42d705bbddfd36e8e02f3 # suppression support
     permissions:
       contents: read
       packages: read
@@ -150,7 +150,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@95b512aab16b1a9012d42d705bbddfd36e8e02f3 # suppression support
     permissions:
       contents: read
       packages: write
@@ -185,7 +185,7 @@ jobs:
           echo "::error::PRs into main must come from this repository's develop branch."
           exit 1
         fi
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@95b512aab16b1a9012d42d705bbddfd36e8e02f3 # suppression support
       with:
         needs: ${{ toJSON(needs) }}
         disabled: '{"unit-test": "Add a real unit test suite and replace the disabled command.", "integration-test":

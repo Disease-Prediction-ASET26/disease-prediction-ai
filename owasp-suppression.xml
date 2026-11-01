@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+  <!--
+    False positive: OWASP Dependency-Check matches the PyPI package `triton`
+    (OpenAI Triton, a GPU kernel compiler pulled in transitively by torch on
+    Linux) to CVE-2023-30859 via the CPE `cpe:2.3:a:triton_project:triton`.
+
+    CVE-2023-30859 is unrelated to OpenAI Triton: it affects software with
+    "bungee" enabled in its configuration, not a GPU compiler and not the
+    NVIDIA Triton Inference Server. This service does not run the NVIDIA
+    Triton Inference Server nor any bungee/Minecraft component; `triton` is
+    present only as a transitive torch dependency on Linux and is never
+    invoked as a network-facing server.
+
+    pip-audit (advisory-database based) reports no vulnerabilities for this
+    dependency set. This suppression is scoped to the single CVE on the
+    triton package so every other finding continues to fail the build.
+  -->
+  <suppress>
+    <notes><![CDATA[
+      OpenAI Triton (PyPI, transitive dep of torch) mis-matched to
+      CVE-2023-30859 (a bungee-config vulnerability). Name collision only.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:pypi/triton@.*$</packageUrl>
+    <cve>CVE-2023-30859</cve>
+  </suppress>
+</suppressions>
