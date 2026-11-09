@@ -62,6 +62,7 @@ class ParseResult:
                 severity=_severity_from_weight(link.severity_weight),
                 duration_days=0,
                 is_mapped=True,
+                canonical_symptom=link.canonical_symptom,
             )
             for link in self.linked
         ]
