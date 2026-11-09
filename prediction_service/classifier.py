@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from .explanation import ExplanationGenerator
 from .features import encode_entries
 from .models import DiseasePrediction, SymptomEntryDTO
 
@@ -27,6 +28,19 @@ class SklearnStrategy(ClassifierStrategy):
         self._estimator = estimator or self._build_estimator()
         self._top_k = top_k
         self._fitted = estimator is not None
+        self._explainer: ExplanationGenerator | None = None
+
+    def with_explanations(
+        self, generator: ExplanationGenerator | None = None
+    ) -> SklearnStrategy:
+        """Enable per-prediction explanations, returning ``self`` for chaining.
+
+        When enabled, each :class:`DiseasePrediction` carries an
+        :class:`~prediction_service.models.Explanation` attributing it to the
+        symptoms that drove it.
+        """
+        self._explainer = generator or ExplanationGenerator()
+        return self
 
     @abstractmethod
     def _build_estimator(self) -> Any:
@@ -63,6 +77,11 @@ class SklearnStrategy(ClassifierStrategy):
                 rank=rank,
                 probability=float(probability),
                 disease_name=str(disease),
+                explanation=(
+                    self._explainer.explain(self._estimator, vector, str(disease))
+                    if self._explainer is not None
+                    else None
+                ),
             )
             for rank, (disease, probability) in enumerate(
                 ranked[: self._top_k], start=1
@@ -131,6 +150,54 @@ class NaiveBayesStrategy(SklearnStrategy):
         from sklearn.naive_bayes import GaussianNB
 
         return GaussianNB()
+
+
+class CalibratedStrategy(SklearnStrategy):
+    """Wrap another strategy's estimator in ``CalibratedClassifierCV``.
+
+    The raw ``predict_proba`` of tree ensembles and naive Bayes is often poorly
+    calibrated -- the numbers rank correctly but don't behave like true
+    probabilities. This strategy fits the base estimator and then calibrates it
+    (Platt scaling via ``"sigmoid"`` or ``"isotonic"``), so the probabilities
+    attached to each :class:`DiseasePrediction` are trustworthy.
+
+    It presents the same interface as any other strategy, so it drops straight
+    into :class:`DiseaseClassifier`, the pipeline, and persistence. ``cv`` is
+    the number of calibration folds; keep it small on datasets with few samples
+    per class.
+    """
+
+    def __init__(
+        self,
+        base: SklearnStrategy,
+        *,
+        method: str = "sigmoid",
+        cv: int = 3,
+        top_k: int | None = None,
+    ) -> None:
+        if method not in ("sigmoid", "isotonic"):
+            raise ValueError(f"method must be 'sigmoid' or 'isotonic', got {method!r}.")
+        self._base = base
+        self.method = method
+        self._cv = cv
+        super().__init__(top_k=top_k if top_k is not None else base._top_k)
+
+    def _build_estimator(self) -> Any:
+        from sklearn.calibration import CalibratedClassifierCV
+
+        return CalibratedClassifierCV(
+            estimator=self._base._estimator,
+            method=self.method,
+            cv=self._cv,
+        )
+
+    @property
+    def algorithm(self) -> str:
+        return f"Calibrated({self._base.algorithm}, {self.method})"
+
+    @property
+    def calibration_method(self) -> str:
+        return self.method
 
 
 class DiseaseClassifier:

@@ -38,7 +38,8 @@ def _trained_strategy() -> RandomForestStrategy:
     rash = encode_entries([_entry("itching"), _entry("skin_rash")])
     features = [flu, flu, rash, rash]
     labels = ["Flu", "Flu", "Rash", "Rash"]
-    return RandomForestStrategy().fit(features, labels)
+    # Explanations are enabled on the served model, so mirror that here.
+    return RandomForestStrategy().fit(features, labels).with_explanations()
 
 
 def _fake_pipeline(
@@ -122,6 +123,27 @@ def test_predict_without_knowledge_returns_null_description(client):
     assert top["precautions"] == []
 
 
+def test_predict_includes_specialty(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/predict", json={"text": "I have a high fever"})
+
+    top = response.json()["predictions"][0]
+    # "Flu" is not in the Kaggle table, so it falls back to the default.
+    assert top["specialty"] == "General Medicine"
+
+
+def test_predict_includes_explanation(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/predict", json={"text": "I have a high fever"})
+
+    top = response.json()["predictions"][0]
+    assert top["explanation"] is not None
+    assert "summary" in top["explanation"]
+    assert top["explanation"]["contribution_weights"]
+
+
 def test_predict_respects_top_k(client):
     _override(_fake_pipeline("itching", "itching", weight=1))
 
@@ -181,3 +203,79 @@ def test_disease_info_unknown_returns_404(client):
 
     assert response.status_code == 404
     assert "Unknown disease" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# /map-symptoms
+# ---------------------------------------------------------------------------
+
+
+def test_map_symptoms_returns_linked(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/map-symptoms", json={"text": "I have a high fever"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_symptoms"] == ["high_fever"]
+    assert body["linked"][0]["canonical_symptom"] == "high_fever"
+    assert body["linked"][0]["source_text"] == "high fever"
+
+
+def test_map_symptoms_no_symptoms_returns_422(client):
+    _override(_empty_pipeline())
+
+    response = client.post("/map-symptoms", json={"text": "hello there"})
+
+    assert response.status_code == 422
+    assert "No known symptoms" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# /red-flags/check
+# ---------------------------------------------------------------------------
+
+
+def test_red_flags_check_with_explicit_symptoms(client):
+    _override(_empty_pipeline())  # pipeline unused when symptoms given
+
+    response = client.post(
+        "/red-flags/check", json={"symptoms": ["chest_pain", "breathlessness"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["highest_urgency"] == "EMERGENCY"
+    names = {f["name"] for f in body["red_flags"]}
+    assert "possible_cardiac_event" in names
+
+
+def test_red_flags_check_from_text(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/red-flags/check", json={"text": "I have a high fever"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_symptoms"] == ["high_fever"]
+    assert body["highest_urgency"] == "URGENT"
+
+
+def test_red_flags_check_no_flags(client):
+    _override(_empty_pipeline())
+
+    response = client.post("/red-flags/check", json={"symptoms": ["itching"]})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["red_flags"] == []
+    assert body["highest_urgency"] is None
+
+
+def test_red_flags_check_requires_input(client):
+    _override(_empty_pipeline())
+
+    response = client.post("/red-flags/check", json={})
+
+    assert response.status_code == 422
+    assert "Provide either" in response.json()["detail"]
