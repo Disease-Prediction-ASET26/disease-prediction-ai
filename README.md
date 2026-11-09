@@ -89,6 +89,184 @@ weight (1–7) if the symptom is active, else 0.
 
 ---
 
+## Classifier
+
+`prediction_service/classifier.py` turns the parser's feature vector into a
+ranked list of diseases. It uses the **Strategy** pattern so models are
+interchangeable, all sharing one feature space (severity-weighted vectors
+aligned to `CANONICAL_SYMPTOMS`).
+
+The Kaggle dataset is almost perfectly separable, so several classic models
+score ~98–100%. Four are provided:
+
+| Strategy | Estimator | Notes |
+| --- | --- | --- |
+| `RandomForestStrategy` | `RandomForestClassifier` | Strong default; robust, gives calibrated-ish probabilities. |
+| `KNNStrategy` | `KNeighborsClassifier` | Simple, competitive on this separable data. |
+| `DecisionTreeStrategy` | `DecisionTreeClassifier` | Interpretable; near-perfect here. |
+| `NaiveBayesStrategy` | `GaussianNB` | Fast baseline. |
+
+All extend `SklearnStrategy`, which handles the shared plumbing: encoding
+entries into feature vectors (`features.encode_entries`), fitting, and ranking
+class probabilities into `DiseasePrediction` objects (top-k, default 5).
+
+```python
+from prediction_service.classifier import DiseaseClassifier, RandomForestStrategy
+from prediction_service.dataset import load_dataset
+
+X, y = load_dataset("dataset.csv")  # Kaggle dataset.csv
+strategy = RandomForestStrategy().fit(X, y)
+
+classifier = DiseaseClassifier(strategy)  # swap models with set_strategy(...)
+predictions = classifier.predict(entries)  # entries from parser.to_symptom_entries()
+```
+
+Any scikit-learn `predict_proba` estimator can be injected
+(`RandomForestStrategy(estimator=my_fitted_model)`), and factories in
+`factory.py` (`RandomForestFactory`, `KNNFactory`, `DecisionTreeFactory`,
+`NaiveBayesFactory`) construct the strategies.
+
+`prediction_service/dataset.py` reads the raw Kaggle `dataset.csv` (one disease
+per row, `Symptom_N` columns) into the same severity-weighted matrix the parser
+emits, so training and inference share one encoding. The CSV is **not** bundled
+— download it from Kaggle and pass its path to `load_dataset`.
+
+---
+
+## End-to-end pipeline
+
+`prediction_service/pipeline.py` routes **free text straight through to ranked
+predictions**, wiring the NLP parser into a trained classifier:
+
+```
+free text
+  -> SymptomParser.parse(text)          NER + negation + linking
+  -> ParseResult.to_symptom_entries()   SymptomEntryDTO[]
+  -> DiseaseClassifier.predict(entries) ranked DiseasePrediction[]
+  -> PredictionResult
+```
+
+```python
+from prediction_service.classifier import RandomForestStrategy
+from prediction_service.dataset import load_dataset
+from prediction_service.pipeline import PredictionPipeline
+
+X, y = load_dataset("dataset.csv")
+strategy = RandomForestStrategy().fit(X, y)
+
+pipeline = PredictionPipeline(strategy)  # or pass a DiseaseClassifier
+result = pipeline.predict("I have a high fever and a cough, but no headache.")
+
+for p in result.predictions:
+    print(p.rank, p.disease_name, round(p.probability, 3))
+```
+
+Both stages are injectable — pass a custom `SymptomParser`
+(`PredictionPipeline(strategy, parser=my_parser)`) to swap the NLP components,
+and `pipeline.parse(text)` exposes the NLP stage alone for inspection.
+
+---
+
+## Training
+
+Train all four strategies on the Kaggle dataset and persist them:
+
+```powershell
+python -m prediction_service.train --data data/dataset.csv --out models
+```
+
+This splits the data (stratified 80/20), prints held-out accuracy for each
+model, refits the winners on the full dataset, and writes:
+
+- `models/random_forest.pkl`, `models/knn.pkl`, `models/decision_tree.pkl`,
+  `models/naive_bayes.pkl` — each a fitted strategy, ready to unpickle.
+- `models/best.pkl` — a copy of the best-scoring model (what the API loads).
+
+On this dataset all four reach **100% accuracy** — both on a stratified 80/20
+hold-out and under 5-fold cross-validation (±0.00). The dataset is almost
+perfectly separable (each disease has a near-unique symptom signature), so this
+reflects how easy the data is rather than real-world diagnostic skill; the
+harder, noisier stage in practice is the NLP parser. Random Forest is kept as
+the default because it degrades most gracefully on the partial/ambiguous
+symptom sets the parser actually produces.
+
+> The dataset CSV is **not** bundled. Download `dataset.csv` from Kaggle
+> ([itachi9604](https://www.kaggle.com/datasets/itachi9604/disease-symptom-description-dataset))
+> into `data/`. `prediction_service/persistence.py` handles load/save of the
+> pickled strategies.
+
+---
+
+## HTTP API
+
+`prediction_service/api.py` is a FastAPI app that routes free text through the
+pipeline. Train a model first (above), then run:
+
+```powershell
+uvicorn prediction_service.api:app --reload
+```
+
+Override the model path with the `DISEASE_MODEL_PATH` env var (defaults to
+`models/best.pkl`). Each prediction is enriched with a description and
+recommended precautions loaded from `data/symptom_Description.csv` and
+`data/symptom_precaution.csv` (override paths with `DISEASE_DESCRIPTION_PATH` /
+`DISEASE_PRECAUTION_PATH`). These CSVs are optional — if absent, `description`
+is `null` and `precautions` is `[]`, and predictions still work.
+
+### Endpoints
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | `{"status": "ok"}` |
+| `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + description + precautions + active symptoms |
+| `GET` | `/diseases/{name}` | — | description + precautions for one disease |
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "I have itching, a skin rash and nodal skin eruptions."}'
+```
+
+```json
+{
+  "predictions": [
+    {
+      "rank": 1,
+      "disease_name": "Fungal infection",
+      "probability": 1.0,
+      "description": "In humans, fungal infections occur when an invading fungus takes over an area of the body ...",
+      "precautions": ["bath twice", "use detol or neem in bathing water", "keep infected area dry", "use clean cloths"]
+    }
+  ],
+  "active_symptoms": ["itching", "skin_rash", "nodal_skin_eruptions"],
+  "disclaimer": "This is not a medical diagnosis."
+}
+```
+
+- `422` if no known symptoms can be extracted from the text (or `text` is empty).
+- `503` if no trained model is found — run the training command first.
+
+Fetch info for a single disease directly (name matched case-insensitively,
+ignoring extra whitespace):
+
+```bash
+curl http://localhost:8000/diseases/Malaria
+```
+
+```json
+{
+  "disease_name": "Malaria",
+  "description": "An infectious disease caused by protozoan parasites ...",
+  "precautions": ["Consult nearest hospital", "avoid oily food", "avoid non veg food", "keep mosquitos out"]
+}
+```
+
+- `404` if the disease name is not in the knowledge base.
+
+Interactive docs are served at `/docs` (Swagger UI) once the app is running.
+
+---
+
 ## Vocabulary
 
 `prediction_service/vocabulary.py` holds `CANONICAL_SYMPTOMS` — the dataset's

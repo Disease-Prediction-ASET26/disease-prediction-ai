@@ -43,3 +43,4 @@ rapidfuzz==3.10.1
 # ---------------------------------------------------------------------------
 pytest==9.0.3
 pytest-cov==6.0.0
+httpx==0.28.1  # required by fastapi.testclient (TestClient) in tests

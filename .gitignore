@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Trained model artifacts (regenerate with prediction_service.train)
+models/
+*.pkl
+
+# Dataset CSVs (download from Kaggle: itachi9604/disease-symptom-description-dataset)
+data/
