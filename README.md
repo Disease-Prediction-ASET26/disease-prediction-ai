@@ -143,6 +143,47 @@ per row, `Symptom_N` columns) into the same severity-weighted matrix the parser
 emits, so training and inference share one encoding. The CSV is **not** bundled
 — download it from Kaggle and pass its path to `load_dataset`.
 
+### Probability calibration
+
+Raw `predict_proba` scores from tree ensembles rank correctly but aren't
+well-calibrated — the numbers don't behave like true probabilities.
+`CalibratedStrategy` (`classifier.py`) wraps any other strategy's estimator in
+scikit-learn's `CalibratedClassifierCV` (`"sigmoid"` / Platt scaling by default,
+or `"isotonic"`) so the probabilities attached to each `DiseasePrediction` are
+trustworthy. It presents the same interface as any other strategy, so it drops
+straight into `DiseaseClassifier`, the pipeline, persistence, and the training
+script.
+
+```python
+from prediction_service.classifier import CalibratedStrategy, RandomForestStrategy
+
+strategy = CalibratedStrategy(RandomForestStrategy(), method="sigmoid", cv=3)
+strategy.fit(X, y)
+```
+
+**The served model is calibrated by default** — `train.py` calibrates the
+best-scoring strategy before writing `best.joblib` (see [Training](#training)).
+
+### Explanations
+
+`prediction_service/explanation.py` attributes a prediction to the symptoms that
+drove it. `ExplanationGenerator` reads the estimator's `feature_importances_`
+(tree models) or `coef_` (linear models) — unwrapping the calibration wrapper
+when present — and keeps only the symptoms that are *active* in the input,
+producing an `Explanation` (a short `summary` plus normalised
+`contribution_weights` per symptom).
+
+Enable it per strategy with `.with_explanations()`; each `DiseasePrediction`
+then carries an `explanation`. **The API enables this by default**, so every
+`/predict` result includes the driving symptoms (see [HTTP API](#http-api)).
+
+```python
+strategy = RandomForestStrategy().fit(X, y).with_explanations()
+prediction = DiseaseClassifier(strategy).predict(entries)[0]
+prediction.explanation.summary  # "Fungal infection is driven mainly by: itching, ..."
+prediction.explanation.contribution_weights  # {"itching": 0.49, "nodal_skin_eruptions": 0.31, ...}
+```
+
 ---
 
 ## End-to-end pipeline
@@ -190,9 +231,20 @@ python -m prediction_service.train --data data/dataset.csv --out models
 This splits the data (stratified 80/20), prints held-out accuracy for each
 model, refits the winners on the full dataset, and writes:
 
-- `models/random_forest.pkl`, `models/knn.pkl`, `models/decision_tree.pkl`,
-  `models/naive_bayes.pkl` — each a fitted strategy, ready to unpickle.
-- `models/best.pkl` — a copy of the best-scoring model (what the API loads).
+- `models/random_forest.joblib`, `models/knn.joblib`,
+  `models/decision_tree.joblib`, `models/naive_bayes.joblib` — each a fitted
+  (uncalibrated) strategy, kept for comparison.
+- `models/best.joblib` — the best-scoring model, **calibrated** (see below),
+  and the artifact the API loads.
+
+By default the best model is wrapped in `CalibratedClassifierCV` before being
+saved as `best.joblib`, so the probabilities the API returns are trustworthy.
+Flags:
+
+- `--no-calibrate` — persist the raw best model without calibration.
+- `--calibration-method {sigmoid,isotonic}` — calibration method (default
+  `sigmoid`). On datasets with too few samples per class for the CV folds,
+  calibration is skipped automatically and the raw model is saved.
 
 On this dataset all four reach **100% accuracy** — both on a stratified 80/20
 hold-out and under 5-fold cross-validation (±0.00). The dataset is almost
@@ -205,7 +257,9 @@ symptom sets the parser actually produces.
 > The dataset CSV is **not** bundled. Download `dataset.csv` from Kaggle
 > ([itachi9604](https://www.kaggle.com/datasets/itachi9604/disease-symptom-description-dataset))
 > into `data/`. `prediction_service/persistence.py` handles load/save of the
-> pickled strategies.
+> strategies via **joblib**, and also provides a versioned `ModelStore` (model
+> registry with metadata + an active-version pointer) when you need to keep and
+> promote several trained models.
 
 ---
 
@@ -219,18 +273,22 @@ uvicorn prediction_service.api:app --reload
 ```
 
 Override the model path with the `DISEASE_MODEL_PATH` env var (defaults to
-`models/best.pkl`). Each prediction is enriched with a description and
-recommended precautions loaded from `data/symptom_Description.csv` and
-`data/symptom_precaution.csv` (override paths with `DISEASE_DESCRIPTION_PATH` /
-`DISEASE_PRECAUTION_PATH`). These CSVs are optional — if absent, `description`
-is `null` and `precautions` is `[]`, and predictions still work.
+`models/best.joblib`). Each prediction is enriched with the medical
+**specialty** that treats the disease, a human-readable **explanation** of the
+driving symptoms, and a description and recommended precautions loaded from
+`data/symptom_Description.csv` and `data/symptom_precaution.csv` (override paths
+with `DISEASE_DESCRIPTION_PATH` / `DISEASE_PRECAUTION_PATH`). The CSVs are
+optional — if absent, `description` is `null` and `precautions` is `[]`, and
+predictions still work.
 
 ### Endpoints
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status": "ok"}` |
-| `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + description + precautions + active symptoms |
+| `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + probability + specialty + explanation + description + precautions + active symptoms |
+| `POST` | `/map-symptoms` | `{"text": "..."}` | NLP-only: linked canonical symptoms + negated spans (no classifier) |
+| `POST` | `/red-flags/check` | `{"text": "..."}` or `{"symptoms": [...]}` | fired red-flag rules + highest urgency |
 | `GET` | `/diseases/{name}` | — | description + precautions for one disease |
 
 ```bash
@@ -245,9 +303,14 @@ curl -X POST http://localhost:8000/predict \
     {
       "rank": 1,
       "disease_name": "Fungal infection",
-      "probability": 1.0,
+      "probability": 0.975,
+      "specialty": "Dermatology",
       "description": "In humans, fungal infections occur when an invading fungus takes over an area of the body ...",
-      "precautions": ["bath twice", "use detol or neem in bathing water", "keep infected area dry", "use clean cloths"]
+      "precautions": ["bath twice", "use detol or neem in bathing water", "keep infected area dry", "use clean cloths"],
+      "explanation": {
+        "summary": "Fungal infection is driven mainly by: itching, nodal skin eruptions, skin rash.",
+        "contribution_weights": {"itching": 0.4854, "nodal_skin_eruptions": 0.305, "skin_rash": 0.2096}
+      }
     }
   ],
   "active_symptoms": ["itching", "skin_rash", "nodal_skin_eruptions"],
@@ -257,6 +320,39 @@ curl -X POST http://localhost:8000/predict \
 
 - `422` if no known symptoms can be extracted from the text (or `text` is empty).
 - `503` if no trained model is found — run the training command first.
+
+The `probability` is **calibrated** (the served `best.joblib` is wrapped in
+`CalibratedClassifierCV`), and the `explanation` attributes the prediction to
+the active symptoms that drove it. The `specialty` is the clinical specialty
+that treats the disease (defaults to `General Medicine` for anything outside
+the Kaggle set).
+
+Map free text to canonical symptoms without running the classifier
+(`POST /map-symptoms`), or screen symptoms against the red-flag rule engine
+(`POST /red-flags/check`), which accepts either `text` or an explicit
+`symptoms` list and returns the fired rules plus the highest urgency
+(`EMERGENCY` / `URGENT` / `ADVISORY`):
+
+```bash
+curl -X POST http://localhost:8000/red-flags/check \
+  -H "Content-Type: application/json" \
+  -d '{"symptoms": ["chest_pain", "breathlessness"]}'
+```
+
+```json
+{
+  "active_symptoms": ["chest_pain", "breathlessness"],
+  "red_flags": [
+    {
+      "name": "possible_cardiac_event",
+      "urgency": "EMERGENCY",
+      "message": "Chest pain with breathlessness or sweating may indicate a cardiac emergency. Seek emergency care immediately.",
+      "matched_symptoms": ["breathlessness", "chest_pain"]
+    }
+  ],
+  "highest_urgency": "EMERGENCY"
+}
+```
 
 Fetch info for a single disease directly (name matched case-insensitively,
 ignoring extra whitespace):
@@ -370,20 +466,23 @@ parser = SymptomParser(negation_detector=KeywordNegationDetector())
 
 ## Tests
 
-The suite lives in `tests/` and runs in well under a second because **all ML
-models are mocked** — no real inference, no network, no model downloads.
+The suite lives in `tests/` (**146 tests**). The NLP parser tests mock all the
+heavy ML models — no real inference, no network, no model downloads — so they
+run in well under a second. The classifier, calibration and persistence tests
+do train small scikit-learn models on tiny in-memory fixtures, so the full run
+takes a few seconds.
 
 ```powershell
 python -m pytest tests
 ```
 
-With branch coverage:
+With branch coverage on the parser:
 
 ```powershell
 python -m pytest tests --cov=prediction_service.parser --cov-branch --cov-report=term-missing
 ```
 
-Current status: **40 tests, ~99% branch coverage** on `parser.py`.
+The parser suite alone is **40 tests at ~99% branch coverage** on `parser.py`.
 
 ### How mocking works
 
@@ -421,16 +520,37 @@ orchestrator in isolation, plus `make_entity` / `make_link` builders and a
 
 ```
 prediction_service/
-├── parser.py        # the pipeline (this README's subject)
+├── parser.py        # the NLP pipeline (free text -> canonical symptoms)
 ├── vocabulary.py    # CANONICAL_SYMPTOMS (131) + normalise_symptom
 ├── severity.py      # Kaggle severity weights + weight_for
+├── features.py      # encode_entries: symptom entries -> feature vector
+├── dataset.py       # load_dataset: Kaggle CSV -> feature matrix + labels
 ├── demo_parser.py   # runnable end-to-end demo
-├── models.py        # domain dataclasses (SymptomEntryDTO, Severity, ...)
-├── classifier.py    # classifier strategy interfaces
-└── factory.py       # classifier factories
+├── models.py        # domain dataclasses (SymptomEntryDTO, Explanation, ...)
+├── classifier.py    # strategies + CalibratedStrategy + DiseaseClassifier
+├── factory.py       # classifier factories
+├── explanation.py   # ExplanationGenerator (per-symptom contributions)
+├── specialty.py     # SpecialtyMapper (disease -> medical specialty, FR-P4)
+├── red_flags.py     # RedFlagEngine (urgent-symptom rule engine)
+├── anonymize.py     # training-data anonymisation (NFR-2)
+├── knowledge.py     # DiseaseKnowledgeBase (descriptions + precautions)
+├── persistence.py   # joblib save/load + versioned ModelStore
+├── train.py         # train, calibrate best, persist
+└── api.py           # FastAPI app (/predict, /map-symptoms, /red-flags/check, ...)
 tests/
-├── conftest.py      # fakes, fixtures, builders
-└── test_parser.py   # 40 tests
+├── conftest.py            # fakes, fixtures, builders
+├── test_parser.py         # NLP pipeline
+├── test_classifier.py     # strategies + factories + encoding
+├── test_calibration.py    # CalibratedStrategy
+├── test_explanation.py    # ExplanationGenerator
+├── test_specialty.py      # SpecialtyMapper
+├── test_red_flags.py      # RedFlagEngine
+├── test_anonymize.py      # anonymisation
+├── test_persistence.py    # joblib round-trip + ModelStore
+├── test_train.py          # calibration wiring
+├── test_knowledge.py      # knowledge base
+├── test_pipeline.py       # end-to-end pipeline
+└── test_api.py            # HTTP endpoints
 requirements.txt
 pytest.ini
 ```

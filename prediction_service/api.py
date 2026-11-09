@@ -32,6 +32,8 @@ from .knowledge import (
 )
 from .persistence import DEFAULT_MODEL_PATH, load_strategy
 from .pipeline import PredictionPipeline
+from .red_flags import RedFlagEngine, Urgency
+from .specialty import SpecialtyMapper
 
 app = FastAPI(
     title="Disease Prediction AI",
@@ -55,12 +57,19 @@ class PredictRequest(BaseModel):
     )
 
 
+class ExplanationItem(BaseModel):
+    summary: str
+    contribution_weights: dict[str, float] = Field(default_factory=dict)
+
+
 class PredictionItem(BaseModel):
     rank: int
     disease_name: str
     probability: float
+    specialty: str
     description: str | None = None
     precautions: list[str] = Field(default_factory=list)
+    explanation: ExplanationItem | None = None
 
 
 class PredictResponse(BaseModel):
@@ -75,11 +84,63 @@ class DiseaseInfoResponse(BaseModel):
     precautions: list[str] = Field(default_factory=list)
 
 
+class MapSymptomsRequest(BaseModel):
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Free-text description of the patient's symptoms.",
+        examples=["I have a high fever and a cough, but no headache."],
+    )
+
+
+class LinkedSymptomItem(BaseModel):
+    source_text: str
+    canonical_symptom: str
+    similarity: float
+    method: str
+    severity_weight: int
+
+
+class MapSymptomsResponse(BaseModel):
+    active_symptoms: list[str]
+    linked: list[LinkedSymptomItem]
+    negated: list[str]
+
+
+class RedFlagCheckRequest(BaseModel):
+    text: str | None = Field(
+        default=None,
+        description="Free text to parse for symptoms (if symptoms not given).",
+    )
+    symptoms: list[str] | None = Field(
+        default=None,
+        description="Explicit canonical symptom names (skips parsing).",
+    )
+
+
+class RedFlagItem(BaseModel):
+    name: str
+    urgency: Urgency
+    message: str
+    matched_symptoms: list[str]
+
+
+class RedFlagCheckResponse(BaseModel):
+    active_symptoms: list[str]
+    red_flags: list[RedFlagItem]
+    highest_urgency: Urgency | None = None
+
+
 @lru_cache(maxsize=1)
 def _build_pipeline() -> PredictionPipeline:
-    """Build the pipeline once (model + NLP parser) and cache it."""
+    """Build the pipeline once (model + NLP parser) and cache it.
+
+    Explanations are enabled on the loaded strategy so every prediction carries
+    the symptoms that drove it.
+    """
     model_path = os.environ.get("DISEASE_MODEL_PATH", str(DEFAULT_MODEL_PATH))
     strategy = load_strategy(model_path)
+    strategy.with_explanations()
     return PredictionPipeline(strategy)
 
 
@@ -108,6 +169,28 @@ def get_knowledge() -> DiseaseKnowledgeBase:
     return _build_knowledge()
 
 
+@lru_cache(maxsize=1)
+def _build_specialty_mapper() -> SpecialtyMapper:
+    """Build the disease -> specialty mapper once and cache it."""
+    return SpecialtyMapper()
+
+
+def get_specialty_mapper() -> SpecialtyMapper:
+    """FastAPI dependency: return the cached specialty mapper."""
+    return _build_specialty_mapper()
+
+
+@lru_cache(maxsize=1)
+def _build_red_flag_engine() -> RedFlagEngine:
+    """Build the red-flag rule engine once and cache it."""
+    return RedFlagEngine()
+
+
+def get_red_flag_engine() -> RedFlagEngine:
+    """FastAPI dependency: return the cached red-flag engine."""
+    return _build_red_flag_engine()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -118,6 +201,7 @@ def predict(
     request: PredictRequest,
     pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
     knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
+    specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
 ) -> PredictResponse:
     parse_result, predictions = pipeline.predict_detailed(request.text)
 
@@ -136,13 +220,93 @@ def predict(
                 rank=p.rank,
                 disease_name=p.disease_name,
                 probability=p.probability,
+                specialty=specialty.specialty_for(p.disease_name),
                 description=knowledge.describe(p.disease_name),
                 precautions=knowledge.precautions_for(p.disease_name),
+                explanation=(
+                    ExplanationItem(
+                        summary=p.explanation.summary,
+                        contribution_weights=p.explanation.contribution_weights,
+                    )
+                    if p.explanation is not None
+                    else None
+                ),
             )
             for p in predictions
         ],
         active_symptoms=parse_result.active_symptoms(),
         disclaimer="This is not a medical diagnosis.",
+    )
+
+
+@app.post("/map-symptoms", response_model=MapSymptomsResponse)
+def map_symptoms(
+    request: MapSymptomsRequest,
+    pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
+) -> MapSymptomsResponse:
+    """Run only the NLP stage: map free text to canonical symptoms.
+
+    Wraps the existing parser so callers can inspect what symptoms were
+    extracted (and which were negated) without running the classifier.
+    """
+    parse_result = pipeline.parse(request.text)
+
+    if not parse_result.active_symptoms():
+        raise HTTPException(
+            status_code=422,
+            detail="No known symptoms could be extracted from the input text.",
+        )
+
+    return MapSymptomsResponse(
+        active_symptoms=parse_result.active_symptoms(),
+        linked=[
+            LinkedSymptomItem(
+                source_text=link.source_text,
+                canonical_symptom=link.canonical_symptom,
+                similarity=link.similarity,
+                method=link.method,
+                severity_weight=link.severity_weight,
+            )
+            for link in parse_result.linked
+        ],
+        negated=[entity.text for entity in parse_result.negated],
+    )
+
+
+@app.post("/red-flags/check", response_model=RedFlagCheckResponse)
+def red_flags_check(
+    request: RedFlagCheckRequest,
+    pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
+    engine: RedFlagEngine = Depends(get_red_flag_engine),  # noqa: B008
+) -> RedFlagCheckResponse:
+    """Check reported symptoms against the red-flag rule engine.
+
+    Accepts either an explicit list of canonical ``symptoms`` or free ``text``
+    to parse. Returns every rule that fired and the highest urgency among them.
+    """
+    if request.symptoms is not None:
+        active = request.symptoms
+    elif request.text:
+        active = pipeline.parse(request.text).active_symptoms()
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either 'symptoms' or 'text'.",
+        )
+
+    fired = engine.check(active)
+    return RedFlagCheckResponse(
+        active_symptoms=active,
+        red_flags=[
+            RedFlagItem(
+                name=flag.name,
+                urgency=flag.urgency,
+                message=flag.message,
+                matched_symptoms=flag.matched_symptoms,
+            )
+            for flag in fired
+        ],
+        highest_urgency=fired[0].urgency if fired else None,
     )
 
 
