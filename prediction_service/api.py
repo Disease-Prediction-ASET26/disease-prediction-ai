@@ -6,6 +6,8 @@ description and recommended precautions::
 
     POST /predict   {"text": "I have a high fever and a cough"}
         -> ranked diseases + description + precautions
+    POST /predict   {"symptoms": ["high_fever", "cough"]}
+        -> same, from checklist symptoms (no NLP); both fields may be combined
 
 Run it (from the project root, after training a model)::
 
@@ -23,7 +25,7 @@ import os
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .knowledge import (
     DEFAULT_DESCRIPTION_PATH,
@@ -43,11 +45,19 @@ app = FastAPI(
 
 
 class PredictRequest(BaseModel):
-    text: str = Field(
-        ...,
+    text: str | None = Field(
+        default=None,
         min_length=1,
         description="Free-text description of the patient's symptoms.",
         examples=["I have a high fever and a cough, but no headache."],
+    )
+    symptoms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Canonical symptom names picked from a checklist (skip the NLP "
+            "stage). Combined with any symptoms parsed from 'text'."
+        ),
+        examples=[["high_fever", "cough"]],
     )
     top_k: int | None = Field(
         default=None,
@@ -55,6 +65,12 @@ class PredictRequest(BaseModel):
         le=41,
         description="How many ranked diseases to return (defaults to the model's).",
     )
+
+    @model_validator(mode="after")
+    def _require_text_or_symptoms(self) -> PredictRequest:
+        if not self.text and not self.symptoms:
+            raise ValueError("Provide 'text' and/or 'symptoms'.")
+        return self
 
 
 class ExplanationItem(BaseModel):
@@ -203,9 +219,11 @@ def predict(
     knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
     specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
 ) -> PredictResponse:
-    parse_result, predictions = pipeline.predict_detailed(request.text)
+    active_symptoms, predictions = pipeline.predict_combined(
+        request.text, request.symptoms or ()
+    )
 
-    if not parse_result.active_symptoms():
+    if not active_symptoms:
         raise HTTPException(
             status_code=422,
             detail="No known symptoms could be extracted from the input text.",
@@ -234,7 +252,7 @@ def predict(
             )
             for p in predictions
         ],
-        active_symptoms=parse_result.active_symptoms(),
+        active_symptoms=active_symptoms,
         disclaimer="This is not a medical diagnosis.",
     )
 

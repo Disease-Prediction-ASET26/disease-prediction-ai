@@ -19,11 +19,24 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from .classifier import ClassifierStrategy, DiseaseClassifier
-from .models import PredictionResult
+from .models import PredictionResult, Severity, SymptomEntryDTO
 from .parser import ParseResult, SymptomParser
+from .vocabulary import CANONICAL_SYMPTOMS, normalise_symptom
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .models import DiseasePrediction
+
+_CANONICAL_BY_NORMALISED: dict[str, str] = {
+    normalise_symptom(symptom): symptom for symptom in CANONICAL_SYMPTOMS
+}
+
+
+def to_canonical(symptom: str) -> str | None:
+    """Map a symptom name (e.g. ``"high_fever"`` or ``"High Fever"``) to the
+    exact canonical vocabulary entry, or ``None`` if it is unknown."""
+    return _CANONICAL_BY_NORMALISED.get(normalise_symptom(symptom))
 
 
 class PredictionPipeline:
@@ -66,3 +79,46 @@ class PredictionPipeline:
         entries = parse_result.to_symptom_entries()
         predictions = self._classifier.predict(entries)
         return parse_result, predictions
+
+    def predict_combined(
+        self,
+        text: str | None = None,
+        symptoms: Sequence[str] = (),
+    ) -> tuple[list[str], list[DiseasePrediction]]:
+        """Predict from free text and/or explicit symptom names together.
+
+        ``symptoms`` are canonical names picked from a checklist, so they skip
+        the NLP stage; unknown names are ignored. Free text, when present, goes
+        through the parser as usual. Returns the active canonical symptoms
+        (text first, then checklist, without duplicates) and the predictions;
+        the predictions are empty when no symptom was recognised.
+        """
+        entries: list[SymptomEntryDTO] = []
+        if text and text.strip():
+            entries.extend(self._parser.parse(text).to_symptom_entries())
+
+        seen = {entry.canonical_symptom for entry in entries}
+        for name in symptoms:
+            canonical = to_canonical(name)
+            if canonical is None or canonical in seen:
+                continue
+            seen.add(canonical)
+            entries.append(
+                SymptomEntryDTO(
+                    entry_id=uuid4(),
+                    raw_text=name,
+                    severity=Severity.MODERATE,
+                    duration_days=0,
+                    is_mapped=True,
+                    canonical_symptom=canonical,
+                )
+            )
+
+        active = [
+            entry.canonical_symptom
+            for entry in entries
+            if entry.canonical_symptom is not None
+        ]
+        if not active:
+            return [], []
+        return active, self._classifier.predict(entries)

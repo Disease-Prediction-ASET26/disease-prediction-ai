@@ -163,8 +163,52 @@ def test_predict_no_symptoms_returns_422(client):
 
 
 def test_predict_rejects_empty_text(client):
+    _override(_empty_pipeline())
     response = client.post("/predict", json={"text": ""})
     assert response.status_code == 422  # pydantic min_length validation
+
+
+def test_predict_from_checklist_symptoms_skips_nlp(client):
+    # The parser would find nothing; the checklist symptoms alone drive it.
+    _override(_empty_pipeline())
+
+    response = client.post(
+        "/predict", json={"symptoms": ["high_fever", "cough"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["predictions"][0]["disease_name"] == "Flu"
+    assert body["active_symptoms"] == ["high_fever", "cough"]
+
+
+def test_predict_combines_text_and_checklist_symptoms(client):
+    _override(_fake_pipeline("itching", "itching", weight=1))
+
+    response = client.post(
+        "/predict",
+        json={"text": "it itches", "symptoms": ["Skin Rash", "itching"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_symptoms"] == ["itching", "skin_rash"]
+    assert body["predictions"][0]["disease_name"] == "Rash"
+
+
+def test_predict_unknown_checklist_symptoms_returns_422(client):
+    _override(_empty_pipeline())
+
+    response = client.post("/predict", json={"symptoms": ["not_a_symptom"]})
+
+    assert response.status_code == 422
+    assert "No known symptoms" in response.json()["detail"]
+
+
+def test_predict_requires_text_or_symptoms(client):
+    _override(_empty_pipeline())
+    response = client.post("/predict", json={})
+    assert response.status_code == 422
 
 
 def test_disease_info_returns_description_and_precautions(client):
