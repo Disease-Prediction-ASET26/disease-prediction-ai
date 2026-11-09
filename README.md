@@ -110,6 +110,18 @@ All extend `SklearnStrategy`, which handles the shared plumbing: encoding
 entries into feature vectors (`features.encode_entries`), fitting, and ranking
 class probabilities into `DiseasePrediction` objects (top-k, default 5).
 
+These four strategies landed across the two most recent changes. The first
+introduced the `SklearnStrategy` base and the `RandomForest`, `KNN`,
+`DecisionTree` and `NaiveBayes` strategies themselves, giving every model one
+shared feature space and a `canonical_symptom` field on `SymptomEntryDTO` so
+linked symptoms carry their exact vocabulary name. The second built the rest of
+the machinery around them: a factory per strategy (`RandomForestFactory`,
+`KNNFactory`, `DecisionTreeFactory`, `NaiveBayesFactory`), the
+`features.encode_entries` encoder and `dataset.load_dataset` loader that feed
+them, a `train.py` that fits and scores all four and pickles each one (plus a
+`best.pkl`), and the end-to-end pipeline and HTTP API that route free text
+through the chosen strategy to ranked diseases.
+
 ```python
 from prediction_service.classifier import DiseaseClassifier, RandomForestStrategy
 from prediction_service.dataset import load_dataset
