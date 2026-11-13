@@ -304,8 +304,9 @@ Use this release flow when the team is ready to promote a model:
    immutable dev digest in the Oracle GitOps repository. Merge that pull
    request to let Argo CD sync the candidate. This requires a GitHub App
    installed on `disease-prediction-gitops` with Contents and Pull requests
-   write access; set `GITOPS_APP_ID` and `GITOPS_APP_PRIVATE_KEY` as Actions
-   secrets in this repository. The local script below can publish an already
+   write access; set `GITOPS_CLIENT_ID` to the app Client ID and
+   `GITOPS_APP_PRIVATE_KEY` to the complete PEM key as Actions secrets in
+   this repository. The local script below can publish an already
    reviewed local artifact when GHCR access is available.
 4. When the dev candidate is accepted for production, publish it using the
    production base image digest:
