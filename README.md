@@ -300,9 +300,13 @@ Use this release flow when the team is ready to promote a model:
    [pinned GitHub mirror](https://github.com/itachi9604/healthcare-chatbot/blob/e4194028a436f6e9beed56bea6f424018734a651/Data/dataset.csv),
    restores its column header, and verifies the original CSV checksum. It then
    retrains with the tagged source revision, scans the image with Trivy, and
-   pushes it to GHCR. Pin the printed image digest in the dev GitOps Deployment
-   and validate the candidate there. The local script below can publish an
-   already reviewed local artifact when GHCR access is available.
+   pushes it to GHCR. The workflow opens or updates a pull request with the
+   immutable dev digest in the Oracle GitOps repository. Merge that pull
+   request to let Argo CD sync the candidate. This requires a GitHub App
+   installed on `disease-prediction-gitops` with Contents and Pull requests
+   write access; set `GITOPS_APP_ID` and `GITOPS_APP_PRIVATE_KEY` as Actions
+   secrets in this repository. The local script below can publish an already
+   reviewed local artifact when GHCR access is available.
 4. When the dev candidate is accepted for production, publish it using the
    production base image digest:
 
