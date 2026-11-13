@@ -45,6 +45,10 @@ class PredictionPipeline:
         """Run only the NLP stage (useful for inspection/debugging)."""
         return self._parser.parse(text)
 
+    def warm_up(self) -> None:
+        """Load the NLP assets needed before serving prediction requests."""
+        self._parser.warm_up()
+
     def predict(self, text: str) -> PredictionResult:
         """Parse free text and return ranked disease predictions."""
         _, predictions = self.predict_detailed(text)

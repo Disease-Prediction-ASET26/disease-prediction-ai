@@ -24,10 +24,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PATH="/opt/venv/bin:${PATH}" \
-    HF_HOME=/var/cache/huggingface \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    LOG_LEVEL=debug
+    LOG_LEVEL=debug \
+    CLINICALBERT_MODEL_PATH=/app/models/clinical-ner \
+    MINILM_MODEL_PATH=/app/models/minilm \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 WORKDIR /app
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
@@ -36,8 +39,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --no-log-init app \
-    && mkdir -p /var/cache/huggingface /app/models \
-    && chown -R app:app /var/cache/huggingface /app/models
+    && mkdir -p /app/models \
+    && chown -R app:app /app/models
 COPY --from=dependencies /opt/venv /opt/venv
 COPY --chown=app:app prediction_service ./prediction_service
 USER 10001:10001
