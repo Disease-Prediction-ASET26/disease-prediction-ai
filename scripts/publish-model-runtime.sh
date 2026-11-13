@@ -186,3 +186,6 @@ fi
 
 echo "Published model runtime: $image:$tag"
 echo "Pin this image in GitOps: $image@$digest"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf 'image-ref=%s@%s\n' "$image" "$digest" >> "$GITHUB_OUTPUT"
+fi
