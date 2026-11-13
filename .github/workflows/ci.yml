@@ -30,7 +30,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@a3c7f020950edfff0eabaa38c8c117e88716be04 # pinned shared action
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@71c3544937d01a29962ff0949906e1cd9953145d # pinned shared action
   secret-scan:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
@@ -153,7 +153,7 @@ jobs:
       && github.event.action != 'closed' }}
     needs:
     - build
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@a3c7f020950edfff0eabaa38c8c117e88716be04 # pinned shared action
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@71c3544937d01a29962ff0949906e1cd9953145d # pinned shared action
     permissions:
       contents: read
       packages: read
@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@a3c7f020950edfff0eabaa38c8c117e88716be04 # dev and production builds with Trivy gate
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@71c3544937d01a29962ff0949906e1cd9953145d # dev and production builds with Trivy gate
     permissions:
       contents: read
       packages: write
@@ -214,7 +214,7 @@ jobs:
           echo "::error::PRs into main must come from this repository's develop branch."
           exit 1
         fi
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@a3c7f020950edfff0eabaa38c8c117e88716be04 # pinned shared action
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/ci-summary@71c3544937d01a29962ff0949906e1cd9953145d # pinned shared action
       with:
         needs: ${{ toJSON(needs) }}
         disabled: '{"integration-test": "The AI test suite is run in unit-test.", "sonarqube": "Main-only. Configure SONAR_HOST_URL, SONAR_PROJECT_KEY, SONAR_TOKEN and enable SONAR_ENABLED."}'
