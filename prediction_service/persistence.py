@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 import joblib
 
+from .artifact import verify_model_artifact
 from .classifier import SklearnStrategy
 from .models import MLModelMetadata
 
@@ -62,6 +63,7 @@ def save_strategy(strategy: SklearnStrategy, path: str | Path) -> None:
 def load_strategy(path: str | Path = DEFAULT_MODEL_PATH) -> SklearnStrategy:
     """Load a fitted strategy from disk (joblib, falling back to legacy pickle)."""
     source = _resolve_existing(Path(path))
+    verify_model_artifact(source, check_runtime=True)
     strategy = joblib.load(source)
     if not isinstance(strategy, SklearnStrategy):
         raise TypeError(f"{source} does not contain a classifier strategy.")

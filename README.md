@@ -220,7 +220,7 @@ and `pipeline.parse(text)` exposes the NLP stage alone for inspection.
 
 ---
 
-## Training
+## Model training and release
 
 Train all four strategies on the Kaggle dataset and persist them:
 
@@ -236,6 +236,8 @@ model, refits the winners on the full dataset, and writes:
   (uncalibrated) strategy, kept for comparison.
 - `models/best.joblib` — the best-scoring model, **calibrated** (see below),
   and the artifact the API loads.
+- `models/best.manifest.json` — model version, file and dataset checksums,
+  training scores, source revision, and Python/scikit-learn versions.
 
 By default the best model is wrapped in `CalibratedClassifierCV` before being
 saved as `best.joblib`, so the probabilities the API returns are trustworthy.
@@ -260,6 +262,65 @@ symptom sets the parser actually produces.
 > strategies via **joblib**, and also provides a versioned `ModelStore` (model
 > registry with metadata + an active-version pointer) when you need to keep and
 > promote several trained models.
+
+For a deployable model, train with the same pinned AI environment used by the
+runtime image. On Linux or macOS, `scripts/train-model.sh` builds that
+environment and writes the model and manifest under the ignored `models/`
+directory. It requires a clean AI source checkout so the recorded commit is
+accurate. Training runs on the workstation; it does not run in the API
+container or in k3s.
+
+### Review and publish a model
+
+Use this release flow when the team is ready to promote a model:
+
+1. Commit the AI code that produced the model. Put the Kaggle CSV in the local
+   `data/` directory; do not commit the dataset or model files.
+2. From the AI repository on Linux or macOS, run:
+
+   ```bash
+   ./scripts/train-model.sh
+   ```
+
+   Review the held-out scores printed by training and the metadata in
+   `models/best.manifest.json`. Test the model with representative inputs and
+   confirm the team accepts the result. Training and this review happen outside
+   the cluster.
+3. After approval, get the immutable digest of the matching AI base image from
+   CI. Start the manual release workflow on the matching branch:
+
+   ```bash
+   gh workflow run publish-model-runtime.yml --ref develop \
+     -f channel=dev \
+     -f ai_base_image=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<digest>
+   ```
+
+   The workflow checks the dataset checksum, retrains with the recorded source
+   revision, scans the image with Trivy, pushes it to GHCR, and prints the
+   published image digest. Pin that digest in the dev GitOps Deployment and
+   validate the candidate there. The local script below can publish an already
+   reviewed local artifact when GHCR access is available.
+4. When the dev candidate is accepted for production, publish it using the
+   production base image digest:
+
+   ```bash
+   gh workflow run publish-model-runtime.yml --ref main \
+     -f channel=prod \
+     -f ai_base_image=ghcr.io/disease-prediction-aset26/disease-prediction-ai@sha256:<digest>
+   ```
+
+   Review and pin the resulting digest in the production GitOps configuration.
+   Do not push the model file or dataset to Git. Production loads the reviewed
+   classifier from the image and does not train it.
+
+The runtime image contains the trained classifier and pinned ClinicalBERT and
+MiniLM inference assets. `/ready` loads these local files before the pod
+receives prediction traffic. The deployed image runs in Hugging Face offline
+mode, so startup does not need Hub access or a writable model cache. Building
+the image downloads the two model snapshots at the revisions in
+`model-assets.json`; the artifact manifest and image digest identify the
+classifier and model asset set. This downloads inference weights during image
+build. It does not train the models.
 
 ---
 
@@ -286,6 +347,7 @@ predictions still work.
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status": "ok"}` |
+| `GET` | `/ready` | — | `{"status": "ready"}` after classifier and parser models load |
 | `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + probability + specialty + explanation + description + precautions + active symptoms |
 | `POST` | `/map-symptoms` | `{"text": "..."}` | NLP-only: linked canonical symptoms + negated spans (no classifier) |
 | `POST` | `/red-flags/check` | `{"text": "..."}` or `{"symptoms": [...]}` | fired red-flag rules + highest urgency |
@@ -407,8 +469,10 @@ The scispaCy NER model is not on PyPI — install it from its release URL:
 pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
 ```
 
-The ClinicalBERT and MiniLM models download automatically from the Hugging Face
-Hub on first use.
+The released runtime image includes pinned ClinicalBERT and MiniLM weights.
+Local Python runs that do not set model paths load the models from Hugging Face
+on first use and use the normal local cache. The release workflow pins the CSV
+by SHA-256 and records its checksum in the classifier manifest.
 
 ## Docker images
 
@@ -417,15 +481,49 @@ The shared Compose setup is in
 `Dockerfile.local` for the source-mounted developer service,
 `Dockerfile.dev` for a deployable dev image, and `Dockerfile.prod` for the
 production runtime image. Each build excludes the local `data/` and `models/`
-folders. The runtime images use CPU-only PyTorch and keep downloaded Hugging
-Face weights in the writable `HF_HOME` cache volume.
+folders. The runtime images use CPU-only PyTorch. The published model runtime
+adds the pinned inference weights to the image.
 
 The API can start without a trained classifier, but `/predict` returns `503`
-until `models/best.joblib` is mounted at the configured model path. ClinicalBERT
-and MiniLM weights are downloaded on first use. For k3s, provide writable
-persistent storage for the Hugging Face cache and a read-only mount for trained
-model and dataset files. The `/health` endpoint is available for container and
-Kubernetes probes.
+until `models/best.joblib` is present at the configured model path. `/ready`
+returns success only after the classifier and manifest have been verified and
+loaded, and the parser models have been loaded. `/health` remains a process
+check. The published runtime image loads the parser models from local files in
+offline mode. A pod cannot receive prediction traffic until this completes.
+
+### Publish a trained model runtime
+
+To publish an already reviewed local artifact, log in to GHCR with package
+write access and install the Trivy version pinned in the shared CI repository.
+The regular dev and production images contain the AI code and dependencies.
+They exclude `models/` and `data/`. The manual release workflow is preferred
+for a tracked release because it checks the training CSV checksum and records
+the source revision. The local script builds the same immutable runtime image:
+
+```sh
+docker login ghcr.io
+scripts/publish-model-runtime.sh dev \
+  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest>
+```
+
+Use `prod` and the production base image for a production model runtime. The
+script requires a digest-pinned base image, verifies the model checksum and
+manifest, downloads only the pinned model files, scans for fixable HIGH and
+CRITICAL vulnerabilities with Trivy, builds for Linux ARM64, and pushes a
+unique tag based on the model, manifest, source code, build recipe, model asset
+set, and base image digest. It prints the resulting image digest. The AI readiness probe
+checks runtime compatibility when it loads the model. Pin the image digest in
+GitOps. Use the Trivy version pinned by the shared CI workflow.
+The runtime image stores `best.joblib` at `/app/models/best.joblib`; the
+classifier needs no download or mount at startup. Keep the source dataset in
+the ignored `data/` directory and never include it in the runtime image.
+Joblib files can execute code while loading, so package only artifacts trained
+and reviewed by the project team.
+
+The published model runtime contains the classifier and both pinned NLP model
+directories. It does not need a Hugging Face cache volume or Hub network access
+at startup. The model revisions and files included in the image are listed in
+`model-assets.json`.
 
 ---
 

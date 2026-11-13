@@ -15,9 +15,12 @@ returns trustworthy rather than merely rank-ordered; disable it with
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from collections import Counter
 from pathlib import Path
 
+from .artifact import manifest_path_for, write_model_manifest
 from .classifier import (
     CalibratedStrategy,
     DecisionTreeStrategy,
@@ -88,6 +91,7 @@ def train_all(
     calibrate: bool = True,
     calibration_method: str = "sigmoid",
     calibration_cv: int = 3,
+    training_revision: str | None = None,
 ) -> dict[str, float]:
     """Train every strategy, persist each, and return held-out accuracies.
 
@@ -131,6 +135,16 @@ def train_all(
             cv=calibration_cv,
         )
     save_strategy(best, out / "best.joblib")
+    calibration_applied = calibrate and _calibration_folds(labels, calibration_cv) >= 2
+    write_model_manifest(
+        out / "best.joblib",
+        data_path,
+        scores=scores,
+        selected_strategy=best_name,
+        calibrated=calibration_applied,
+        calibration_method=calibration_method,
+        training_revision=training_revision,
+    )
 
     return scores
 
@@ -153,6 +167,11 @@ def main() -> None:
         choices=("sigmoid", "isotonic"),
         help="Calibration method for the served model (default: sigmoid).",
     )
+    parser.add_argument(
+        "--source-revision",
+        default=os.environ.get("GITHUB_SHA"),
+        help="AI source commit used for training (defaults to GITHUB_SHA when set).",
+    )
     args = parser.parse_args()
 
     scores = train_all(
@@ -160,6 +179,7 @@ def main() -> None:
         args.out,
         calibrate=args.calibrate,
         calibration_method=args.calibration_method,
+        training_revision=args.source_revision,
     )
 
     print("\nHeld-out accuracy:")
@@ -170,6 +190,8 @@ def main() -> None:
         f"calibrated ({args.calibration_method})" if args.calibrate else "uncalibrated"
     )
     print(f"\nBest model: {best} [{calib}] (saved to {args.out}/best.joblib)")
+    manifest = manifest_path_for(Path(args.out) / "best.joblib")
+    print(f"Model version: {json.loads(manifest.read_text())['model_version']}")
 
 
 if __name__ == "__main__":

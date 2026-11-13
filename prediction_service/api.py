@@ -196,6 +196,21 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ready")
+def ready(
+    pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
+) -> dict[str, str]:
+    """Warm the NLP models and report ready only when predictions can run."""
+    try:
+        pipeline.warm_up()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Prediction models are not ready.",
+        ) from exc
+    return {"status": "ready"}
+
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(
     request: PredictRequest,
