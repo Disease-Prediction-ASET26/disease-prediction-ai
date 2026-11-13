@@ -410,6 +410,23 @@ pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/
 The ClinicalBERT and MiniLM models download automatically from the Hugging Face
 Hub on first use.
 
+## Docker images
+
+The shared Compose setup is in
+[`disease-prediction-docker`](../disease-prediction-docker). It uses
+`Dockerfile.local` for the source-mounted developer service,
+`Dockerfile.dev` for a deployable dev image, and `Dockerfile.prod` for the
+production runtime image. Each build excludes the local `data/` and `models/`
+folders. The runtime images use CPU-only PyTorch and keep downloaded Hugging
+Face weights in the writable `HF_HOME` cache volume.
+
+The API can start without a trained classifier, but `/predict` returns `503`
+until `models/best.joblib` is mounted at the configured model path. ClinicalBERT
+and MiniLM weights are downloaded on first use. For k3s, provide writable
+persistent storage for the Hugging Face cache and a read-only mount for trained
+model and dataset files. The `/health` endpoint is available for container and
+Kubernetes probes.
+
 ---
 
 ## Usage

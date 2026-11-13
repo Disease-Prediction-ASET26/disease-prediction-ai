@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_IMAGE=python:3.11.18-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39
+FROM ${PYTHON_IMAGE} AS dependencies
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential g++ libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+COPY requirements-runtime.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 \
+    && pip install -r requirements-runtime.txt \
+    && pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
+
+FROM ${PYTHON_IMAGE} AS runtime
+ENV PATH="/opt/venv/bin:${PATH}" \
+    HF_HOME=/var/cache/huggingface \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LOG_LEVEL=debug
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home --no-log-init app \
+    && mkdir -p /var/cache/huggingface /app/models \
+    && chown -R app:app /var/cache/huggingface /app/models
+COPY --from=dependencies /opt/venv /opt/venv
+COPY --chown=app:app prediction_service ./prediction_service
+USER 10001:10001
+EXPOSE 8000
+CMD ["sh", "-c", "exec uvicorn prediction_service.api:app --host 0.0.0.0 --port 8000 --workers 1 --log-level \"${LOG_LEVEL}\" --access-log"]
