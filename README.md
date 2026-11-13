@@ -296,11 +296,11 @@ Use this release flow when the team is ready to promote a model:
 
    The tag starts the release workflow. It confirms that the tagged commit is
    on `develop`, resolves the current AI base tag to its immutable digest,
-   checks the dataset checksum, retrains with the tagged source revision,
-   scans the image with Trivy, and pushes it to GHCR. Pin the printed image
-   digest in the dev GitOps Deployment and validate the candidate there. The
-   local script below can publish an already reviewed local artifact when GHCR
-   access is available.
+   downloads Kaggle dataset version 2 and verifies its CSV checksum, retrains
+   with the tagged source revision, scans the image with Trivy, and pushes it
+   to GHCR. Pin the printed image digest in the dev GitOps Deployment and
+   validate the candidate there. The local script below can publish an already
+   reviewed local artifact when GHCR access is available.
 4. When the dev candidate is accepted for production, publish it using the
    production base image digest:
 
