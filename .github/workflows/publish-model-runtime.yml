@@ -1,6 +1,10 @@
 name: Publish model runtime
 
 on:
+  push:
+    tags:
+      - model-runtime-dev-*
+      - model-runtime-prod-*
   workflow_dispatch:
     inputs:
       channel:
@@ -11,7 +15,7 @@ on:
           - dev
           - prod
       ai_base_image:
-        description: Matching AI base image pinned by sha256 digest
+        description: Matching AI base image pinned by sha256 digest (manual runs only)
         required: true
         type: string
 
@@ -24,7 +28,7 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ (inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'push' || (inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
@@ -39,20 +43,64 @@ jobs:
         with:
           python-version: '3.11.18'
 
-      - name: Check channel and base image
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Resolve channel and pinned base image
+        id: target
         env:
-          CHANNEL: ${{ inputs.channel }}
-          AI_BASE_IMAGE: ${{ inputs.ai_base_image }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_BASE_IMAGE: ${{ inputs.ai_base_image }}
+          REF_NAME: ${{ github.ref_name }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$AI_BASE_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
-          case "$CHANNEL" in
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            case "$REF_NAME" in
+              model-runtime-dev-*) channel=dev; base_branch=develop; base_tag=develop ;;
+              model-runtime-prod-*) channel=prod; base_branch=main; base_tag=main ;;
+              *) echo "Unsupported model runtime tag." >&2; exit 1 ;;
+            esac
+            comparison_status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_REVISION...$base_branch" --jq '.status')"
+            [[ "$comparison_status" == "ahead" || "$comparison_status" == "identical" ]]
+            if [[ "$channel" == "dev" ]]; then
+              base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev
+            else
+              base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai
+            fi
+            base_digest="$(docker buildx imagetools inspect "$base_repo:$base_tag" | awk '/^Digest:/ {print $2; exit}')"
+            [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            base_image="$base_repo@$base_digest"
+          else
+            channel="$INPUT_CHANNEL"
+            base_image="$INPUT_BASE_IMAGE"
+            case "$channel" in
             dev)
-              [[ "$AI_BASE_IMAGE" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:* ]]
+              [[ "$base_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:* ]]
               ;;
             prod)
-              [[ "$AI_BASE_IMAGE" == ghcr.io/disease-prediction-aset26/disease-prediction-ai@sha256:* ]]
+              [[ "$base_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai@sha256:* ]]
               ;;
+            *) echo "Channel must be dev or prod." >&2; exit 1 ;;
+            esac
+            [[ "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "base_image=$base_image" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Runtime release inputs"
+            echo
+            echo "- Channel: \`$channel\`"
+            echo "- Base image: \`$base_image\`"
+            echo "- Source revision: \`$SOURCE_REVISION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           esac
 
       - name: Download the pinned training dataset
@@ -99,19 +147,11 @@ jobs:
           tar -xzf /tmp/trivy.tar.gz -C /tmp/disease-prediction-tools trivy
           echo /tmp/disease-prediction-tools >> "$GITHUB_PATH"
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
       - name: Build, scan, and publish the immutable runtime image
-        env:
-          CHANNEL: ${{ inputs.channel }}
-          AI_BASE_IMAGE: ${{ inputs.ai_base_image }}
         run: |
           set -euo pipefail
-          scripts/publish-model-runtime.sh "$CHANNEL" "$AI_BASE_IMAGE" | tee /tmp/publish-summary.txt
+          scripts/publish-model-runtime.sh \
+            "${{ steps.target.outputs.channel }}" \
+            "${{ steps.target.outputs.base_image }}" \
+            | tee /tmp/publish-summary.txt
           cat /tmp/publish-summary.txt >> "$GITHUB_STEP_SUMMARY"

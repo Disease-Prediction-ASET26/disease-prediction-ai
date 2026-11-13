@@ -286,27 +286,27 @@ Use this release flow when the team is ready to promote a model:
    `models/best.manifest.json`. Test the model with representative inputs and
    confirm the team accepts the result. Training and this review happen outside
    the cluster.
-3. After approval, get the immutable digest of the matching AI base image from
-   CI. Start the manual release workflow on the matching branch:
+3. After approval, wait for CI to publish the AI base image on `develop`. Make
+   an annotated release tag on the reviewed `develop` commit and push it:
 
    ```bash
-   gh workflow run publish-model-runtime.yml --ref develop \
-     -f channel=dev \
-     -f ai_base_image=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<digest>
+   git tag -a model-runtime-dev-v0.1.0 develop -m "Publish dev model runtime"
+   git push origin model-runtime-dev-v0.1.0
    ```
 
-   The workflow checks the dataset checksum, retrains with the recorded source
-   revision, scans the image with Trivy, pushes it to GHCR, and prints the
-   published image digest. Pin that digest in the dev GitOps Deployment and
-   validate the candidate there. The local script below can publish an already
-   reviewed local artifact when GHCR access is available.
+   The tag starts the release workflow. It confirms that the tagged commit is
+   on `develop`, resolves the current AI base tag to its immutable digest,
+   checks the dataset checksum, retrains with the tagged source revision,
+   scans the image with Trivy, and pushes it to GHCR. Pin the printed image
+   digest in the dev GitOps Deployment and validate the candidate there. The
+   local script below can publish an already reviewed local artifact when GHCR
+   access is available.
 4. When the dev candidate is accepted for production, publish it using the
    production base image digest:
 
    ```bash
-   gh workflow run publish-model-runtime.yml --ref main \
-     -f channel=prod \
-     -f ai_base_image=ghcr.io/disease-prediction-aset26/disease-prediction-ai@sha256:<digest>
+   git tag -a model-runtime-prod-v0.1.0 main -m "Publish production model runtime"
+   git push origin model-runtime-prod-v0.1.0
    ```
 
    Review and pin the resulting digest in the production GitOps configuration.
