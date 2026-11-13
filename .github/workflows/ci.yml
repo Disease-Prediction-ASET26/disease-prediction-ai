@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@a72a81c5b80a82b7614350fb090647d5ffcd5bd3 # dev and production builds with Trivy gate
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@5d4a668154db4c894c6f5300f2e6a3c14649a438 # GHCR publisher retries transient blob failures
     permissions:
       contents: read
       packages: write
