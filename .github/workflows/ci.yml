@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@71c3544937d01a29962ff0949906e1cd9953145d # dev and production builds with Trivy gate
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@a72a81c5b80a82b7614350fb090647d5ffcd5bd3 # dev and production builds with Trivy gate
     permissions:
       contents: read
       packages: write
