@@ -163,6 +163,8 @@ def test_predict_no_symptoms_returns_422(client):
 
 
 def test_predict_rejects_empty_text(client):
+    # Keep this schema-validation test independent of the trained model artifact.
+    _override(_empty_pipeline())
     response = client.post("/predict", json={"text": ""})
     assert response.status_code == 422  # pydantic min_length validation
 
