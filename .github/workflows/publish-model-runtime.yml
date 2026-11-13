@@ -101,7 +101,6 @@ jobs:
             echo "- Base image: \`$base_image\`"
             echo "- Source revision: \`$SOURCE_REVISION\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          esac
 
       - name: Download the pinned training dataset
         run: |
