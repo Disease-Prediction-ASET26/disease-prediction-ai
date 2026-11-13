@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_IMAGE=python:3.11.18-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
+FROM ${PYTHON_IMAGE} AS dependencies
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends build-essential g++ libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --no-cache-dir --upgrade setuptools==84.2.1
+ENV PATH="/opt/venv/bin:${PATH}"
+COPY requirements-runtime.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 \
+    && pip install -r requirements-runtime.txt \
+    && pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz" \
+    && pip uninstall -y pip
+
+FROM ${PYTHON_IMAGE} AS runtime
+ENV PATH="/opt/venv/bin:${PATH}" \
+    HF_HOME=/var/cache/huggingface \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LOG_LEVEL=info
+WORKDIR /app
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && python -m pip uninstall -y pip setuptools \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home --no-log-init app \
+    && mkdir -p /var/cache/huggingface /app/models \
+    && chown -R app:app /var/cache/huggingface /app/models
+COPY --from=dependencies /opt/venv /opt/venv
+COPY --chown=app:app prediction_service ./prediction_service
+USER 10001:10001
+EXPOSE 8000
+CMD ["sh", "-c", "exec uvicorn prediction_service.api:app --host 0.0.0.0 --port 8000 --workers 1 --log-level \"${LOG_LEVEL}\" --access-log"]
