@@ -107,8 +107,23 @@ jobs:
           set -euo pipefail
           mkdir -p data
           curl --fail --location --silent --show-error \
-            'https://www.kaggle.com/api/v1/datasets/download/itachi9604/disease-symptom-description-dataset/dataset.csv?datasetVersionNumber=2' \
-            --output data/dataset.csv
+            https://raw.githubusercontent.com/itachi9604/healthcare-chatbot/e4194028a436f6e9beed56bea6f424018734a651/Data/dataset.csv \
+            --output /tmp/disease-symptom-dataset.csv
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("/tmp/disease-symptom-dataset.csv").read_bytes()
+          blank_header, separator, rows = source.partition(b"\n")
+          if separator != b"\n" or blank_header != b"," * 17:
+              raise SystemExit("Unexpected pinned dataset mirror format.")
+
+          header = (
+              "Disease,"
+              + ",".join(f"Symptom_{number}" for number in range(1, 18))
+              + "\n"
+          ).encode()
+          Path("data/dataset.csv").write_bytes(header + rows)
+          PY
           echo "ebbd391c4ba4d64f57a00eb3d0a55f0ca9b920b0c5de6b9af4234e72519c9618  data/dataset.csv" | sha256sum --check
 
       - name: Train and record the reviewed classifier candidate
