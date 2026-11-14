@@ -285,10 +285,10 @@ jobs:
           printf '\n- Published image: %s@%s\n' "$image" "$digest" >> "$GITHUB_STEP_SUMMARY"
 
   update-gitops:
-    name: Open GitOps image update
+    name: Update GitOps image digest
     needs: [prepare, publish]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     permissions:
       contents: read
       pull-requests: read
@@ -355,28 +355,31 @@ jobs:
           if not re.fullmatch(expected, image_ref) or channel not in ('dev', 'prod'):
               raise SystemExit('Invalid published image digest or channel')
           path = Path(f'gitops/clusters/proxmox/disease-prediction-ai/{channel}/deployment.yaml')
-          sections = path.read_text(encoding='utf-8').split('\n---\n')
+          sections = path.read_bytes().decode('utf-8').split('\n---\n')
           matches = 0
           for index, section in enumerate(sections):
               if not re.search(r'(?m)^kind: Deployment$', section):
                   continue
               if not re.search(r'(?m)^  name: ai$', section):
                   continue
-              lines = section.splitlines()
-              image_lines = [i for i, line in enumerate(lines) if re.match(r'^\s+image:\s', line)]
+              lines = section.splitlines(keepends=True)
+              image_lines = [i for i, line in enumerate(lines) if re.match(r'^[ \t]+image:[ \t]+', line)]
               if len(image_lines) != 1:
                   raise SystemExit('Expected one image in the ai Deployment')
               line_index = image_lines[0]
-              indent = re.match(r'^(\s+image:\s*)', lines[line_index]).group(1)
-              lines[line_index] = indent + image_ref
-              sections[index] = '\n'.join(lines)
+              line = lines[line_index]
+              indent = re.match(r'^([ \t]+image:[ \t]+)', line).group(1)
+              ending = line[len(line.rstrip('\r\n')):]
+              lines[line_index] = indent + image_ref + ending
+              sections[index] = ''.join(lines)
               matches += 1
           if matches != 1:
               raise SystemExit(f'Expected one ai Deployment, found {matches}')
-          path.write_text('\n---\n'.join(sections) + '\n', encoding='utf-8')
+          path.write_bytes('\n---\n'.join(sections).encode('utf-8'))
           PY
           git -C gitops diff --check
       - name: Open or update the GitOps pull request
+        id: gitops-pr
         if: ${{ steps.current.outputs.update == 'true' }}
         env:
           GH_TOKEN: ${{ steps.gitops-token.outputs.token }}
@@ -403,5 +406,24 @@ jobs:
           if [[ -n "$number" ]]; then
             gh pr edit "$number" --repo Disease-Prediction-ASET26/disease-prediction-gitops --title "$title" --body-file "$RUNNER_TEMP/gitops-pr.txt"
           else
-            gh pr create --repo Disease-Prediction-ASET26/disease-prediction-gitops --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/gitops-pr.txt"
+            pr_url="$(gh pr create --repo Disease-Prediction-ASET26/disease-prediction-gitops --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/gitops-pr.txt")"
+            number="${pr_url##*/}"
           fi
+          [[ "$number" =~ ^[0-9]+$ ]]
+          head_sha="$(git -C gitops rev-parse HEAD)"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          printf 'number=%s\nhead-sha=%s\n' "$number" "$head_sha" >> "$GITHUB_OUTPUT"
+      - name: Merge the validated GitOps update
+        if: ${{ steps.gitops-pr.outputs.number != '' }}
+        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@9e6e3f6a1f5e78832ed199c2639db4f9395972df
+        with:
+          token: ${{ steps.gitops-token.outputs.token }}
+          number: ${{ steps.gitops-pr.outputs.number }}
+          head-sha: ${{ steps.gitops-pr.outputs.head-sha }}
+          manifest: clusters/proxmox/disease-prediction-ai/${{ needs.prepare.outputs.channel }}/deployment.yaml
+          deployment: ai
+          image: ${{ needs.publish.outputs.image-ref }}
+          source-repository: ${{ github.repository }}
+          source-branch: ${{ needs.prepare.outputs.channel == 'prod' && 'main' || 'develop' }}
+          source-sha: ${{ needs.prepare.outputs.source-revision }}
+          timeout-seconds: '900'
