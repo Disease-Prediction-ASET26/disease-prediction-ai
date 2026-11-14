@@ -302,12 +302,14 @@ architecture.
    passes, the release workflow uses the base image built by that exact CI run
    and the selected classifier. It builds, scans, and runs an offline
    prediction on native AMD64 and ARM64 runners. It publishes an image index
-   and opens a GitOps pull request for the Proxmox dev deployment. Merge the
-   GitOps pull request to deploy it.
+   and opens a GitOps pull request for the Proxmox dev deployment. The workflow
+   merges the update after GitOps validation and secret scanning pass. Argo CD
+   then deploys the image.
 5. After the team accepts the dev image for production, run **Publish model
    runtime** on `main` with channel `prod`. Supply the production base image
    digest, the accepted dev runtime image digest, and the same classifier
-   SHA-256. Review and merge the production GitOps pull request.
+   SHA-256. The workflow merges the production GitOps update after its checks
+   pass.
 
 The workflow requires a GitHub App installed on `disease-prediction-gitops`
 with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
@@ -317,7 +319,8 @@ image are pinned by digest; the workflow records them in its run summary.
 Subsequent changes merged into `develop` rebuild the runtime with the classifier
 pinned in `model-release-dev.json`. To rerun a release manually, select the
 matching branch and channel and supply its base image, source runtime image,
-and classifier checksum.
+and classifier checksum. If a GitOps check fails or the source changes during
+the release, the workflow leaves the pull request open for inspection.
 
 The runtime image contains the trained classifier and pinned ClinicalBERT and
 MiniLM inference assets. `/ready` loads these local files before the pod
