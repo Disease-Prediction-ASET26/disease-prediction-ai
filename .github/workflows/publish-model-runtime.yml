@@ -121,6 +121,19 @@ jobs:
           if not required.issubset(platforms):
               raise SystemExit(f'Base image must contain both Linux platforms: {required}')
           PY
+          docker buildx imagetools inspect "$base_image" --format '{{json .Image}}' > /tmp/base-configs.json
+          python3 - "$source_revision" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          revision, repository = sys.argv[1:]
+          images = json.loads(Path('/tmp/base-configs.json').read_text())
+          for platform in ('linux/amd64', 'linux/arm64'):
+              labels = images.get(platform, {}).get('config', {}).get('Labels', {})
+              if (labels.get('org.opencontainers.image.revision') != revision or
+                  labels.get('org.opencontainers.image.source') != f'https://github.com/{repository}'):
+                  raise SystemExit(f'{platform} base image does not match the source revision')
+          PY
           printf 'channel=%s\nbase-image=%s\nclassifier-image=%s\nclassifier-sha256=%s\nsource-revision=%s\n' \
             "$channel" "$base_image" "$classifier_image" "$classifier_sha256" "$source_revision" >> "$GITHUB_OUTPUT"
       - name: Retrieve and verify the reviewed classifier

@@ -319,8 +319,9 @@ image are pinned by digest; the workflow records them in its run summary.
 Subsequent changes merged into `develop` or `main` rebuild the matching runtime
 with the classifier pinned for that environment. To rerun a release manually,
 select the matching branch and channel and supply the base image from that
-branch's CI run. The source runtime image and classifier checksum must match
-the environment's release file. Releases for each environment run one at a
+branch's current CI run. Both image architectures must match the current source
+revision. The source runtime image and classifier checksum must match the
+environment's release file. Releases for each environment run one at a
 time, and pending releases wait in a queue. A failed GitOps check leaves its
 pull request open for inspection. The workflow refuses to deploy an outdated
 source revision.
