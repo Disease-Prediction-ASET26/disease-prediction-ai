@@ -30,11 +30,11 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@fa91ac76885b8cad6548bc1b3cf54682efefdf30 # pinned shared action
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@4c34af8c536e99eff863c654c603f096d3234010 # pinned shared action
   secret-scan:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/secret-scan.yml@76e94bd640d92a3ffbf20e9cd5914e22b5ca40cd # shared secret scan
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/secret-scan.yml@f85ec3d7dc9b79e28b68822e5045823b46961ef5 # shared secret scan
     permissions:
       contents: read
   lint:
@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@fa91ac76885b8cad6548bc1b3cf54682efefdf30 # multi-platform publisher
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@4c34af8c536e99eff863c654c603f096d3234010 # multi-platform publisher
     permissions:
       contents: read
       packages: write
