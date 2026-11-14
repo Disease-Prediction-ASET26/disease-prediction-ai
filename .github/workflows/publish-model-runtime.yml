@@ -33,6 +33,7 @@ permissions:
 concurrency:
   group: model-runtime-${{ inputs.channel || 'dev' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -415,7 +416,7 @@ jobs:
           printf 'number=%s\nhead-sha=%s\n' "$number" "$head_sha" >> "$GITHUB_OUTPUT"
       - name: Merge the validated GitOps update
         if: ${{ steps.gitops-pr.outputs.number != '' }}
-        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@9e6e3f6a1f5e78832ed199c2639db4f9395972df
+        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@fa91ac76885b8cad6548bc1b3cf54682efefdf30
         with:
           token: ${{ steps.gitops-token.outputs.token }}
           number: ${{ steps.gitops-pr.outputs.number }}

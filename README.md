@@ -319,8 +319,10 @@ image are pinned by digest; the workflow records them in its run summary.
 Subsequent changes merged into `develop` rebuild the runtime with the classifier
 pinned in `model-release-dev.json`. To rerun a release manually, select the
 matching branch and channel and supply its base image, source runtime image,
-and classifier checksum. If a GitOps check fails or the source changes during
-the release, the workflow leaves the pull request open for inspection.
+and classifier checksum. Releases for each environment run one at a time,
+and pending releases wait in a queue. A failed GitOps check leaves its pull
+request open for inspection. The workflow refuses to deploy an outdated source
+revision.
 
 The runtime image contains the trained classifier and pinned ClinicalBERT and
 MiniLM inference assets. `/ready` loads these local files before the pod

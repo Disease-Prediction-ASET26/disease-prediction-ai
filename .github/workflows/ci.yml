@@ -18,7 +18,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   workflow-lint:
@@ -30,7 +30,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@71c3544937d01a29962ff0949906e1cd9953145d # pinned shared action
+    - uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/validate-workflows@fa91ac76885b8cad6548bc1b3cf54682efefdf30 # pinned shared action
   secret-scan:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@1f3c567c6e3f5936c24bed6eaf7e4a4b04145937 # multi-platform publisher
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@fa91ac76885b8cad6548bc1b3cf54682efefdf30 # multi-platform publisher
     permissions:
       contents: read
       packages: write
