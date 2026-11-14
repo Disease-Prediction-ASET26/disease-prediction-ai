@@ -416,7 +416,7 @@ jobs:
           printf 'number=%s\nhead-sha=%s\n' "$number" "$head_sha" >> "$GITHUB_OUTPUT"
       - name: Merge the validated GitOps update
         if: ${{ steps.gitops-pr.outputs.number != '' }}
-        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@4c34af8c536e99eff863c654c603f096d3234010
+        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@8651d87e2c9a0dfcb55fcad9b8e9dfe9885cb75f
         with:
           token: ${{ steps.gitops-token.outputs.token }}
           number: ${{ steps.gitops-pr.outputs.number }}
