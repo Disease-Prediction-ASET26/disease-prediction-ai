@@ -7,6 +7,6 @@ transformers==5.10.4
 torch==2.13.0
 spacy==3.7.5
 scispacy==0.5.5
-negspacy==1.0.4
+negspacy==1.1.0
 sentence-transformers==5.6.0
 rapidfuzz==3.10.1
