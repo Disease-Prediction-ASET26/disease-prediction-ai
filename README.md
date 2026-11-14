@@ -324,7 +324,8 @@ revision. The source runtime image and classifier checksum must match the
 environment's release file. Releases for each environment run one at a
 time, and pending releases wait in a queue. A failed GitOps check leaves its
 pull request open for inspection. The workflow refuses to deploy an outdated
-source revision.
+source revision. Keep the pinned classifier source images and any images needed
+for rollback in GHCR. Deleting a pinned source prevents later releases.
 
 The runtime image contains the trained classifier and pinned ClinicalBERT and
 MiniLM inference assets. `/ready` loads these local files before the pod
