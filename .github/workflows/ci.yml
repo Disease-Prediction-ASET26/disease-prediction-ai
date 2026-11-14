@@ -34,7 +34,7 @@ jobs:
   secret-scan:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && github.event.action != 'closed' }}
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/secret-scan.yml@76e94bd640d92a3ffbf20e9cd5914e22b5ca40cd # shared secret scan
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/secret-scan.yml@f85ec3d7dc9b79e28b68822e5045823b46961ef5 # shared secret scan
     permissions:
       contents: read
   lint:
