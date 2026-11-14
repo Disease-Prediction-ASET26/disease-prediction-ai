@@ -89,6 +89,365 @@ weight (1–7) if the symptom is active, else 0.
 
 ---
 
+## Classifier
+
+`prediction_service/classifier.py` turns the parser's feature vector into a
+ranked list of diseases. It uses the **Strategy** pattern so models are
+interchangeable, all sharing one feature space (severity-weighted vectors
+aligned to `CANONICAL_SYMPTOMS`).
+
+The Kaggle dataset is almost perfectly separable, so several classic models
+score ~98–100%. Four are provided:
+
+| Strategy | Estimator | Notes |
+| --- | --- | --- |
+| `RandomForestStrategy` | `RandomForestClassifier` | Strong default; robust, gives calibrated-ish probabilities. |
+| `KNNStrategy` | `KNeighborsClassifier` | Simple, competitive on this separable data. |
+| `DecisionTreeStrategy` | `DecisionTreeClassifier` | Interpretable; near-perfect here. |
+| `NaiveBayesStrategy` | `GaussianNB` | Fast baseline. |
+
+All extend `SklearnStrategy`, which handles the shared plumbing: encoding
+entries into feature vectors (`features.encode_entries`), fitting, and ranking
+class probabilities into `DiseasePrediction` objects (top-k, default 5).
+
+These four strategies landed across the two most recent changes. The first
+introduced the `SklearnStrategy` base and the `RandomForest`, `KNN`,
+`DecisionTree` and `NaiveBayes` strategies themselves, giving every model one
+shared feature space and a `canonical_symptom` field on `SymptomEntryDTO` so
+linked symptoms carry their exact vocabulary name. The second built the rest of
+the machinery around them: a factory per strategy (`RandomForestFactory`,
+`KNNFactory`, `DecisionTreeFactory`, `NaiveBayesFactory`), the
+`features.encode_entries` encoder and `dataset.load_dataset` loader that feed
+them, a `train.py` that fits and scores all four and pickles each one (plus a
+`best.pkl`), and the end-to-end pipeline and HTTP API that route free text
+through the chosen strategy to ranked diseases.
+
+```python
+from prediction_service.classifier import DiseaseClassifier, RandomForestStrategy
+from prediction_service.dataset import load_dataset
+
+X, y = load_dataset("dataset.csv")  # Kaggle dataset.csv
+strategy = RandomForestStrategy().fit(X, y)
+
+classifier = DiseaseClassifier(strategy)  # swap models with set_strategy(...)
+predictions = classifier.predict(entries)  # entries from parser.to_symptom_entries()
+```
+
+Any scikit-learn `predict_proba` estimator can be injected
+(`RandomForestStrategy(estimator=my_fitted_model)`), and factories in
+`factory.py` (`RandomForestFactory`, `KNNFactory`, `DecisionTreeFactory`,
+`NaiveBayesFactory`) construct the strategies.
+
+`prediction_service/dataset.py` reads the raw Kaggle `dataset.csv` (one disease
+per row, `Symptom_N` columns) into the same severity-weighted matrix the parser
+emits, so training and inference share one encoding. The CSV is **not** bundled
+— download it from Kaggle and pass its path to `load_dataset`.
+
+### Probability calibration
+
+Raw `predict_proba` scores from tree ensembles rank correctly but aren't
+well-calibrated — the numbers don't behave like true probabilities.
+`CalibratedStrategy` (`classifier.py`) wraps any other strategy's estimator in
+scikit-learn's `CalibratedClassifierCV` (`"sigmoid"` / Platt scaling by default,
+or `"isotonic"`) so the probabilities attached to each `DiseasePrediction` are
+trustworthy. It presents the same interface as any other strategy, so it drops
+straight into `DiseaseClassifier`, the pipeline, persistence, and the training
+script.
+
+```python
+from prediction_service.classifier import CalibratedStrategy, RandomForestStrategy
+
+strategy = CalibratedStrategy(RandomForestStrategy(), method="sigmoid", cv=3)
+strategy.fit(X, y)
+```
+
+**The served model is calibrated by default** — `train.py` calibrates the
+best-scoring strategy before writing `best.joblib` (see [Training](#training)).
+
+### Explanations
+
+`prediction_service/explanation.py` attributes a prediction to the symptoms that
+drove it. `ExplanationGenerator` reads the estimator's `feature_importances_`
+(tree models) or `coef_` (linear models) — unwrapping the calibration wrapper
+when present — and keeps only the symptoms that are *active* in the input,
+producing an `Explanation` (a short `summary` plus normalised
+`contribution_weights` per symptom).
+
+Enable it per strategy with `.with_explanations()`; each `DiseasePrediction`
+then carries an `explanation`. **The API enables this by default**, so every
+`/predict` result includes the driving symptoms (see [HTTP API](#http-api)).
+
+```python
+strategy = RandomForestStrategy().fit(X, y).with_explanations()
+prediction = DiseaseClassifier(strategy).predict(entries)[0]
+prediction.explanation.summary  # "Fungal infection is driven mainly by: itching, ..."
+prediction.explanation.contribution_weights  # {"itching": 0.49, "nodal_skin_eruptions": 0.31, ...}
+```
+
+---
+
+## End-to-end pipeline
+
+`prediction_service/pipeline.py` routes **free text straight through to ranked
+predictions**, wiring the NLP parser into a trained classifier:
+
+```
+free text
+  -> SymptomParser.parse(text)          NER + negation + linking
+  -> ParseResult.to_symptom_entries()   SymptomEntryDTO[]
+  -> DiseaseClassifier.predict(entries) ranked DiseasePrediction[]
+  -> PredictionResult
+```
+
+```python
+from prediction_service.classifier import RandomForestStrategy
+from prediction_service.dataset import load_dataset
+from prediction_service.pipeline import PredictionPipeline
+
+X, y = load_dataset("dataset.csv")
+strategy = RandomForestStrategy().fit(X, y)
+
+pipeline = PredictionPipeline(strategy)  # or pass a DiseaseClassifier
+result = pipeline.predict("I have a high fever and a cough, but no headache.")
+
+for p in result.predictions:
+    print(p.rank, p.disease_name, round(p.probability, 3))
+```
+
+Both stages are injectable — pass a custom `SymptomParser`
+(`PredictionPipeline(strategy, parser=my_parser)`) to swap the NLP components,
+and `pipeline.parse(text)` exposes the NLP stage alone for inspection.
+
+---
+
+## Model training and release
+
+Train all four strategies on the Kaggle dataset and persist them:
+
+```powershell
+python -m prediction_service.train --data data/dataset.csv --out models
+```
+
+This splits the data (stratified 80/20), prints held-out accuracy for each
+model, refits the winners on the full dataset, and writes:
+
+- `models/random_forest.joblib`, `models/knn.joblib`,
+  `models/decision_tree.joblib`, `models/naive_bayes.joblib` — each a fitted
+  (uncalibrated) strategy, kept for comparison.
+- `models/best.joblib` — the best-scoring model, **calibrated** (see below),
+  and the artifact the API loads.
+- `models/best.manifest.json` — model version, file and dataset checksums,
+  training scores, source revision, and Python/scikit-learn versions.
+
+By default the best model is wrapped in `CalibratedClassifierCV` before being
+saved as `best.joblib`, so the probabilities the API returns are trustworthy.
+Flags:
+
+- `--no-calibrate` — persist the raw best model without calibration.
+- `--calibration-method {sigmoid,isotonic}` — calibration method (default
+  `sigmoid`). On datasets with too few samples per class for the CV folds,
+  calibration is skipped automatically and the raw model is saved.
+
+On this dataset all four reach **100% accuracy** — both on a stratified 80/20
+hold-out and under 5-fold cross-validation (±0.00). The dataset is almost
+perfectly separable (each disease has a near-unique symptom signature), so this
+reflects how easy the data is rather than real-world diagnostic skill; the
+harder, noisier stage in practice is the NLP parser. Random Forest is kept as
+the default because it degrades most gracefully on the partial/ambiguous
+symptom sets the parser actually produces.
+
+> The dataset CSV is **not** bundled. Download `dataset.csv` from Kaggle
+> ([itachi9604](https://www.kaggle.com/datasets/itachi9604/disease-symptom-description-dataset))
+> into `data/`. `prediction_service/persistence.py` handles load/save of the
+> strategies via **joblib**, and also provides a versioned `ModelStore` (model
+> registry with metadata + an active-version pointer) when you need to keep and
+> promote several trained models.
+
+For a deployable model, train with the same pinned AI environment used by the
+runtime image. On Linux or macOS, `scripts/train-model.sh` builds that
+environment and writes the model and manifest under the ignored `models/`
+directory. It requires a clean AI source checkout so the recorded commit is
+accurate. Training runs on the workstation; it does not run in the API
+container or in k3s.
+
+### Review and publish a model
+
+Train and review a candidate on your workstation. The release workflow never
+trains a model. It copies the exact classifier from a digest-pinned runtime
+image, checks its manifest and checksum, then builds an image for each CPU
+architecture.
+
+1. Commit the AI code that produced the model. Put the Kaggle CSV in the local
+   `data/` directory. Do not commit the dataset or model files.
+2. From the AI repository on Linux or macOS, run:
+
+   ```bash
+   ./scripts/train-model.sh
+   ```
+
+   Review the held-out scores in `models/best.manifest.json` and check the
+   model with representative inputs. Record its full SHA-256:
+
+   ```bash
+   sha256sum models/best.joblib
+   ```
+
+3. Package the reviewed local files as a candidate image, following
+   [Publish a trained model runtime](#publish-a-trained-model-runtime). Record
+   the candidate image digest and the classifier SHA-256. The candidate image
+   can contain one CPU architecture: the release workflow uses it only as an
+   immutable source for the classifier.
+4. Update `model-release-dev.json` with the candidate image digest and the
+   classifier SHA-256. Open and merge a pull request into `develop`. After CI
+   passes, the release workflow uses the base image built by that exact CI run
+   and the selected classifier. It builds, scans, and runs an offline
+   prediction on native AMD64 and ARM64 runners. It publishes an image index
+   and opens a GitOps pull request for the Proxmox dev deployment. The workflow
+   merges the update after GitOps validation and secret scanning pass. Argo CD
+   then deploys the image.
+5. After the team accepts the dev image for production, run **Publish model
+   runtime** on `main` with channel `prod`. Supply the production base image
+   digest, the accepted dev runtime image digest, and the same classifier
+   SHA-256. The workflow merges the production GitOps update after its checks
+   pass.
+
+The workflow requires a GitHub App installed on `disease-prediction-gitops`
+with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
+Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
+secrets in this repository. The classifier source image, base image, and output
+image are pinned by digest; the workflow records them in its run summary.
+Subsequent changes merged into `develop` rebuild the runtime with the classifier
+pinned in `model-release-dev.json`. To rerun a release manually, select the
+matching branch and channel and supply its base image, source runtime image,
+and classifier checksum. Releases for each environment run one at a time,
+and pending releases wait in a queue. A failed GitOps check leaves its pull
+request open for inspection. The workflow refuses to deploy an outdated source
+revision.
+
+The runtime image contains the trained classifier and pinned ClinicalBERT and
+MiniLM inference assets. `/ready` loads these local files before the pod
+receives prediction traffic. The deployed image runs in Hugging Face offline
+mode, so startup does not need Hub access or a writable model cache. Building
+the image downloads the two model snapshots at the revisions in
+`model-assets.json`; the artifact manifest and image digest identify the
+classifier and model asset set. This downloads inference weights during image
+build. It does not train the models.
+
+---
+
+## HTTP API
+
+`prediction_service/api.py` is a FastAPI app that routes free text through the
+pipeline. Train a model first (above), then run:
+
+```powershell
+uvicorn prediction_service.api:app --reload
+```
+
+Override the model path with the `DISEASE_MODEL_PATH` env var (defaults to
+`models/best.joblib`). Each prediction is enriched with the medical
+**specialty** that treats the disease, a human-readable **explanation** of the
+driving symptoms, and a description and recommended precautions loaded from
+`data/symptom_Description.csv` and `data/symptom_precaution.csv` (override paths
+with `DISEASE_DESCRIPTION_PATH` / `DISEASE_PRECAUTION_PATH`). The CSVs are
+optional — if absent, `description` is `null` and `precautions` is `[]`, and
+predictions still work.
+
+### Endpoints
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | `{"status": "ok"}` |
+| `GET` | `/ready` | — | `{"status": "ready"}` after classifier and parser models load |
+| `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + probability + specialty + explanation + description + precautions + active symptoms |
+| `POST` | `/map-symptoms` | `{"text": "..."}` | NLP-only: linked canonical symptoms + negated spans (no classifier) |
+| `POST` | `/red-flags/check` | `{"text": "..."}` or `{"symptoms": [...]}` | fired red-flag rules + highest urgency |
+| `GET` | `/diseases/{name}` | — | description + precautions for one disease |
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "I have itching, a skin rash and nodal skin eruptions."}'
+```
+
+```json
+{
+  "predictions": [
+    {
+      "rank": 1,
+      "disease_name": "Fungal infection",
+      "probability": 0.975,
+      "specialty": "Dermatology",
+      "description": "In humans, fungal infections occur when an invading fungus takes over an area of the body ...",
+      "precautions": ["bath twice", "use detol or neem in bathing water", "keep infected area dry", "use clean cloths"],
+      "explanation": {
+        "summary": "Fungal infection is driven mainly by: itching, nodal skin eruptions, skin rash.",
+        "contribution_weights": {"itching": 0.4854, "nodal_skin_eruptions": 0.305, "skin_rash": 0.2096}
+      }
+    }
+  ],
+  "active_symptoms": ["itching", "skin_rash", "nodal_skin_eruptions"],
+  "disclaimer": "This is not a medical diagnosis."
+}
+```
+
+- `422` if no known symptoms can be extracted from the text (or `text` is empty).
+- `503` if no trained model is found — run the training command first.
+
+The `probability` is **calibrated** (the served `best.joblib` is wrapped in
+`CalibratedClassifierCV`), and the `explanation` attributes the prediction to
+the active symptoms that drove it. The `specialty` is the clinical specialty
+that treats the disease (defaults to `General Medicine` for anything outside
+the Kaggle set).
+
+Map free text to canonical symptoms without running the classifier
+(`POST /map-symptoms`), or screen symptoms against the red-flag rule engine
+(`POST /red-flags/check`), which accepts either `text` or an explicit
+`symptoms` list and returns the fired rules plus the highest urgency
+(`EMERGENCY` / `URGENT` / `ADVISORY`):
+
+```bash
+curl -X POST http://localhost:8000/red-flags/check \
+  -H "Content-Type: application/json" \
+  -d '{"symptoms": ["chest_pain", "breathlessness"]}'
+```
+
+```json
+{
+  "active_symptoms": ["chest_pain", "breathlessness"],
+  "red_flags": [
+    {
+      "name": "possible_cardiac_event",
+      "urgency": "EMERGENCY",
+      "message": "Chest pain with breathlessness or sweating may indicate a cardiac emergency. Seek emergency care immediately.",
+      "matched_symptoms": ["breathlessness", "chest_pain"]
+    }
+  ],
+  "highest_urgency": "EMERGENCY"
+}
+```
+
+Fetch info for a single disease directly (name matched case-insensitively,
+ignoring extra whitespace):
+
+```bash
+curl http://localhost:8000/diseases/Malaria
+```
+
+```json
+{
+  "disease_name": "Malaria",
+  "description": "An infectious disease caused by protozoan parasites ...",
+  "precautions": ["Consult nearest hospital", "avoid oily food", "avoid non veg food", "keep mosquitos out"]
+}
+```
+
+- `404` if the disease name is not in the knowledge base.
+
+Interactive docs are served at `/docs` (Swagger UI) once the app is running.
+
+---
+
 ## Vocabulary
 
 `prediction_service/vocabulary.py` holds `CANONICAL_SYMPTOMS` — the dataset's
@@ -121,8 +480,55 @@ The scispaCy NER model is not on PyPI — install it from its release URL:
 pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
 ```
 
-The ClinicalBERT and MiniLM models download automatically from the Hugging Face
-Hub on first use.
+The released runtime image includes pinned ClinicalBERT and MiniLM weights.
+Local Python runs that do not set model paths load the models from Hugging Face
+on first use and use the normal local cache. Training records the dataset
+checksum in the classifier manifest.
+
+## Docker images
+
+The shared Compose setup is in
+[`disease-prediction-docker`](../disease-prediction-docker). It uses
+`Dockerfile.local` for the source-mounted developer service,
+`Dockerfile.dev` for a deployable dev image, and `Dockerfile.prod` for the
+production runtime image. Each build excludes the local `data/` and `models/`
+folders. The runtime images use CPU-only PyTorch. The published model runtime
+adds the pinned inference weights to the image.
+
+The API can start without a trained classifier, but `/predict` returns `503`
+until `models/best.joblib` is present at the configured model path. `/ready`
+returns success only after the classifier and manifest have been verified and
+loaded, and the parser models have been loaded. `/health` remains a process
+check. The published runtime image loads the parser models from local files in
+offline mode. A pod cannot receive prediction traffic until this completes.
+
+### Publish a trained model runtime
+
+Use this command to put an already reviewed local classifier in GHCR as a
+candidate. Run it on a native AMD64 or ARM64 host with Docker Buildx, Trivy,
+and package write access. Replace the base digest, architecture, and unique
+candidate tag with your values:
+
+```sh
+docker login ghcr.io
+scripts/publish-model-runtime.sh dev \
+  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest> \
+  amd64 candidate-<unique-name> models
+```
+
+The script checks the artifact manifest, downloads pinned inference files,
+scans for fixable HIGH and CRITICAL vulnerabilities, runs a prediction without
+network access, and publishes the tested image. Record its printed digest for
+the GitHub release workflow. The workflow builds and checks both architectures
+and publishes their combined image index. Pin the resulting index digest in
+GitOps. Keep the source dataset in the ignored `data/` directory and never
+include it in the runtime image. Joblib files can execute code while loading,
+so package only artifacts trained and reviewed by the project team.
+
+The published model runtime contains the classifier and both pinned NLP model
+directories. It does not need a Hugging Face cache volume or Hub network access
+at startup. The model revisions and files included in the image are listed in
+`model-assets.json`.
 
 ---
 
@@ -180,20 +586,23 @@ parser = SymptomParser(negation_detector=KeywordNegationDetector())
 
 ## Tests
 
-The suite lives in `tests/` and runs in well under a second because **all ML
-models are mocked** — no real inference, no network, no model downloads.
+The suite lives in `tests/` (**146 tests**). The NLP parser tests mock all the
+heavy ML models — no real inference, no network, no model downloads — so they
+run in well under a second. The classifier, calibration and persistence tests
+do train small scikit-learn models on tiny in-memory fixtures, so the full run
+takes a few seconds.
 
 ```powershell
 python -m pytest tests
 ```
 
-With branch coverage:
+With branch coverage on the parser:
 
 ```powershell
 python -m pytest tests --cov=prediction_service.parser --cov-branch --cov-report=term-missing
 ```
 
-Current status: **40 tests, ~99% branch coverage** on `parser.py`.
+The parser suite alone is **40 tests at ~99% branch coverage** on `parser.py`.
 
 ### How mocking works
 
@@ -231,16 +640,37 @@ orchestrator in isolation, plus `make_entity` / `make_link` builders and a
 
 ```
 prediction_service/
-├── parser.py        # the pipeline (this README's subject)
+├── parser.py        # the NLP pipeline (free text -> canonical symptoms)
 ├── vocabulary.py    # CANONICAL_SYMPTOMS (131) + normalise_symptom
 ├── severity.py      # Kaggle severity weights + weight_for
+├── features.py      # encode_entries: symptom entries -> feature vector
+├── dataset.py       # load_dataset: Kaggle CSV -> feature matrix + labels
 ├── demo_parser.py   # runnable end-to-end demo
-├── models.py        # domain dataclasses (SymptomEntryDTO, Severity, ...)
-├── classifier.py    # classifier strategy interfaces
-└── factory.py       # classifier factories
+├── models.py        # domain dataclasses (SymptomEntryDTO, Explanation, ...)
+├── classifier.py    # strategies + CalibratedStrategy + DiseaseClassifier
+├── factory.py       # classifier factories
+├── explanation.py   # ExplanationGenerator (per-symptom contributions)
+├── specialty.py     # SpecialtyMapper (disease -> medical specialty, FR-P4)
+├── red_flags.py     # RedFlagEngine (urgent-symptom rule engine)
+├── anonymize.py     # training-data anonymisation (NFR-2)
+├── knowledge.py     # DiseaseKnowledgeBase (descriptions + precautions)
+├── persistence.py   # joblib save/load + versioned ModelStore
+├── train.py         # train, calibrate best, persist
+└── api.py           # FastAPI app (/predict, /map-symptoms, /red-flags/check, ...)
 tests/
-├── conftest.py      # fakes, fixtures, builders
-└── test_parser.py   # 40 tests
+├── conftest.py            # fakes, fixtures, builders
+├── test_parser.py         # NLP pipeline
+├── test_classifier.py     # strategies + factories + encoding
+├── test_calibration.py    # CalibratedStrategy
+├── test_explanation.py    # ExplanationGenerator
+├── test_specialty.py      # SpecialtyMapper
+├── test_red_flags.py      # RedFlagEngine
+├── test_anonymize.py      # anonymisation
+├── test_persistence.py    # joblib round-trip + ModelStore
+├── test_train.py          # calibration wiring
+├── test_knowledge.py      # knowledge base
+├── test_pipeline.py       # end-to-end pipeline
+└── test_api.py            # HTTP endpoints
 requirements.txt
 pytest.ini
 ```

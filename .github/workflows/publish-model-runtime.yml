@@ -1,0 +1,430 @@
+name: Publish model runtime
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [develop]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Runtime release channel
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      ai_base_image:
+        description: Multi-platform AI base image pinned by sha256 digest
+        required: true
+        type: string
+      classifier_image:
+        description: Reviewed runtime image containing the classifier, pinned by sha256 digest
+        required: true
+        type: string
+      classifier_sha256:
+        description: SHA-256 of the reviewed best.joblib file
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-runtime-${{ inputs.channel || 'dev' }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop') || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
+    outputs:
+      channel: ${{ steps.target.outputs.channel }}
+      base-image: ${{ steps.target.outputs.base-image }}
+      classifier-image: ${{ steps.target.outputs.classifier-image }}
+      classifier-sha256: ${{ steps.target.outputs.classifier-sha256 }}
+      source-revision: ${{ steps.target.outputs.source-revision }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Resolve and validate the release inputs
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_BASE_IMAGE: ${{ inputs.ai_base_image }}
+          INPUT_CLASSIFIER_IMAGE: ${{ inputs.classifier_image }}
+          INPUT_CLASSIFIER_SHA256: ${{ inputs.classifier_sha256 }}
+          CI_REVISION: ${{ github.event.workflow_run.head_sha }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            channel=dev
+            source_revision="$CI_REVISION"
+            [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$CI_RUN_ID" =~ ^[0-9]+$ && "$CI_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/develop" --jq .sha)"
+            if [[ "$branch_head" != "$source_revision" ]]; then
+              echo 'A newer develop commit exists; skip this superseded release.' >&2
+              exit 1
+            fi
+            base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev
+            base_tag="sha-$source_revision-$CI_RUN_ID-$CI_RUN_ATTEMPT"
+            base_digest="$(docker buildx imagetools inspect "$base_repo:$base_tag" | awk '/^Digest:/ {print $2; exit}')"
+            base_image="$base_repo@$base_digest"
+            classifier_image="$(python3 -c 'import json; print(json.load(open("model-release-dev.json"))["classifier_image"])')"
+            classifier_sha256="$(python3 -c 'import json; print(json.load(open("model-release-dev.json"))["classifier_sha256"])')"
+          else
+            channel="$INPUT_CHANNEL"
+            source_revision="$GITHUB_SHA"
+            base_image="$INPUT_BASE_IMAGE"
+            classifier_image="$INPUT_CLASSIFIER_IMAGE"
+            classifier_sha256="$INPUT_CLASSIFIER_SHA256"
+          fi
+          case "$channel" in
+            dev) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev ;;
+            prod) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai ;;
+            *) echo 'Unsupported channel.' >&2; exit 1 ;;
+          esac
+          [[ "$base_image" == "$expected_base"@sha256:* && "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$classifier_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:* && "$classifier_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$classifier_sha256" =~ ^[0-9a-f]{64}$ && "$source_revision" =~ ^[0-9a-f]{40}$ ]]
+          docker buildx imagetools inspect "$base_image" --raw > /tmp/base-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('/tmp/base-manifest.json').read_text())
+          platforms = {(item.get('platform', {}).get('os'), item.get('platform', {}).get('architecture'))
+                       for item in manifest.get('manifests', [])}
+          required = {('linux', 'amd64'), ('linux', 'arm64')}
+          if not required.issubset(platforms):
+              raise SystemExit(f'Base image must contain both Linux platforms: {required}')
+          PY
+          printf 'channel=%s\nbase-image=%s\nclassifier-image=%s\nclassifier-sha256=%s\nsource-revision=%s\n' \
+            "$channel" "$base_image" "$classifier_image" "$classifier_sha256" "$source_revision" >> "$GITHUB_OUTPUT"
+      - name: Retrieve and verify the reviewed classifier
+        env:
+          CHANNEL: ${{ steps.target.outputs.channel }}
+          BASE_IMAGE: ${{ steps.target.outputs.base-image }}
+          SOURCE_REVISION: ${{ steps.target.outputs.source-revision }}
+          CLASSIFIER_IMAGE: ${{ steps.target.outputs.classifier-image }}
+          CLASSIFIER_SHA256: ${{ steps.target.outputs.classifier-sha256 }}
+        run: |
+          set -euo pipefail
+          # Older approved images can contain only ARM64. Creating a container
+          # copies files without executing it, so no emulation is needed.
+          if ! docker pull --platform linux/amd64 "$CLASSIFIER_IMAGE"; then
+            docker pull --platform linux/arm64 "$CLASSIFIER_IMAGE"
+          fi
+          # A single-platform manifest may pull successfully despite the
+          # requested platform, so inspect the architecture actually loaded.
+          platform="$(docker image inspect "$CLASSIFIER_IMAGE" --format '{{.Os}}/{{.Architecture}}')"
+          [[ "$platform" == linux/amd64 || "$platform" == linux/arm64 ]]
+          container="$(docker create --platform "$platform" "$CLASSIFIER_IMAGE")"
+          trap 'docker rm "$container" >/dev/null' EXIT
+          mkdir -p reviewed-model
+          docker cp "$container:/app/models/best.joblib" reviewed-model/best.joblib
+          docker cp "$container:/app/models/best.manifest.json" reviewed-model/best.manifest.json
+          python3 -m prediction_service.artifact reviewed-model/best.joblib --require-manifest
+          printf '%s  %s\n' "$CLASSIFIER_SHA256" reviewed-model/best.joblib | sha256sum --check
+          {
+            echo '## Model runtime release'
+            echo
+            echo "- Channel: \`$CHANNEL\`"
+            echo "- Base image: \`$BASE_IMAGE\`"
+            echo "- Reviewed image: \`$CLASSIFIER_IMAGE\`"
+            echo "- Classifier SHA-256: \`$CLASSIFIER_SHA256\`"
+            echo "- Source revision: \`$SOURCE_REVISION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reviewed-classifier
+          path: reviewed-model/
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source-revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: reviewed-classifier
+          path: reviewed-model
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Install pinned Trivy
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            amd64)
+              archive=trivy_0.70.0_Linux-64bit.tar.gz
+              checksum=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9
+              ;;
+            arm64)
+              archive=trivy_0.70.0_Linux-ARM64.tar.gz
+              checksum=2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d
+              ;;
+          esac
+          mkdir -p /tmp/disease-prediction-tools
+          curl --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/$archive" \
+            --output /tmp/trivy.tar.gz
+          printf '%s  %s\n' "$checksum" /tmp/trivy.tar.gz | sha256sum --check
+          tar -xzf /tmp/trivy.tar.gz -C /tmp/disease-prediction-tools trivy
+          echo /tmp/disease-prediction-tools >> "$GITHUB_PATH"
+      - name: Build, scan, and check offline inference
+        id: publish
+        env:
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          BASE_IMAGE: ${{ needs.prepare.outputs.base-image }}
+          CLASSIFIER_SHA256: ${{ needs.prepare.outputs.classifier-sha256 }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$CLASSIFIER_SHA256" reviewed-model/best.joblib | sha256sum --check
+          scripts/publish-model-runtime.sh "$CHANNEL" "$BASE_IMAGE" "$ARCH" \
+            "$CHANNEL-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH" reviewed-model
+      - name: Save platform digest
+        env:
+          IMAGE_REF: ${{ steps.publish.outputs.image-ref }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$IMAGE_REF" > image-ref.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-${{ matrix.arch }}
+          path: image-ref.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      image-ref: ${{ steps.index.outputs.image-ref }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: runtime-*
+          path: digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish the tested image index
+        id: index
+        env:
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime
+          amd64="$(cat digests/runtime-amd64/image-ref.txt)"
+          arm64="$(cat digests/runtime-arm64/image-ref.txt)"
+          for ref in "$amd64" "$arm64"; do
+            [[ "$ref" == "$image"@sha256:* && "$ref" =~ @sha256:[0-9a-f]{64}$ ]]
+          done
+          tag="$image:$CHANNEL-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker buildx imagetools create --tag "$tag" "$amd64" "$arm64"
+          digest="$(docker buildx imagetools inspect "$tag" | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$image@$digest" --raw > /tmp/runtime-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('/tmp/runtime-manifest.json').read_text())
+          platforms = {(item.get('platform', {}).get('os'), item.get('platform', {}).get('architecture'))
+                       for item in manifest.get('manifests', [])}
+          required = {('linux', 'amd64'), ('linux', 'arm64')}
+          if not required.issubset(platforms):
+              raise SystemExit(f'Published image is missing a Linux platform: {required}')
+          PY
+          printf 'image-ref=%s@%s\n' "$image" "$digest" >> "$GITHUB_OUTPUT"
+          printf '\n- Published image: %s@%s\n' "$image" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+  update-gitops:
+    name: Update GitOps image digest
+    needs: [prepare, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check for a newer source revision
+        id: current
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REVISION: ${{ needs.prepare.outputs.source-revision }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/develop" --jq .sha)"
+            if [[ "$branch_head" != "$SOURCE_REVISION" ]]; then
+              echo 'A newer develop commit exists; skip the GitOps update.'
+              echo 'update=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo 'update=true' >> "$GITHUB_OUTPUT"
+      - name: Require GitOps app credentials
+        if: ${{ steps.current.outputs.update == 'true' }}
+        env:
+          APP_ID: ${{ secrets.GITOPS_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$APP_ID" || -z "$PRIVATE_KEY" ]]; then
+            echo '::error::Set GITOPS_CLIENT_ID and GITOPS_APP_PRIVATE_KEY before publishing a runtime.'
+            exit 1
+          fi
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        if: ${{ steps.current.outputs.update == 'true' }}
+        id: gitops-token
+        with:
+          client-id: ${{ secrets.GITOPS_CLIENT_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          owner: Disease-Prediction-ASET26
+          repositories: disease-prediction-gitops
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.current.outputs.update == 'true' }}
+        with:
+          repository: Disease-Prediction-ASET26/disease-prediction-gitops
+          ref: main
+          token: ${{ steps.gitops-token.outputs.token }}
+          path: gitops
+          persist-credentials: false
+      - name: Pin the model runtime digest
+        if: ${{ steps.current.outputs.update == 'true' }}
+        env:
+          IMAGE_REF: ${{ needs.publish.outputs.image-ref }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          image_ref = os.environ['IMAGE_REF']
+          channel = os.environ['CHANNEL']
+          expected = r'ghcr\.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:[0-9a-f]{64}'
+          if not re.fullmatch(expected, image_ref) or channel not in ('dev', 'prod'):
+              raise SystemExit('Invalid published image digest or channel')
+          path = Path(f'gitops/clusters/proxmox/disease-prediction-ai/{channel}/deployment.yaml')
+          sections = path.read_bytes().decode('utf-8').split('\n---\n')
+          matches = 0
+          for index, section in enumerate(sections):
+              if not re.search(r'(?m)^kind: Deployment$', section):
+                  continue
+              if not re.search(r'(?m)^  name: ai$', section):
+                  continue
+              lines = section.splitlines(keepends=True)
+              image_lines = [i for i, line in enumerate(lines) if re.match(r'^[ \t]+image:[ \t]+', line)]
+              if len(image_lines) != 1:
+                  raise SystemExit('Expected one image in the ai Deployment')
+              line_index = image_lines[0]
+              line = lines[line_index]
+              indent = re.match(r'^([ \t]+image:[ \t]+)', line).group(1)
+              ending = line[len(line.rstrip('\r\n')):]
+              lines[line_index] = indent + image_ref + ending
+              sections[index] = ''.join(lines)
+              matches += 1
+          if matches != 1:
+              raise SystemExit(f'Expected one ai Deployment, found {matches}')
+          path.write_bytes('\n---\n'.join(sections).encode('utf-8'))
+          PY
+          git -C gitops diff --check
+      - name: Open or update the GitOps pull request
+        id: gitops-pr
+        if: ${{ steps.current.outputs.update == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.gitops-token.outputs.token }}
+          IMAGE_REF: ${{ needs.publish.outputs.image-ref }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          branch="automation/update-model-runtime-$CHANNEL"
+          path="clusters/proxmox/disease-prediction-ai/$CHANNEL/deployment.yaml"
+          git -C gitops config user.name 'github-actions[bot]'
+          git -C gitops config user.email 'github-actions[bot]@users.noreply.github.com'
+          git -C gitops switch -c "$branch"
+          git -C gitops add "$path"
+          if git -C gitops diff --cached --quiet; then
+            echo "The $CHANNEL manifest already uses this digest."
+            exit 0
+          fi
+          title="Update model runtime $CHANNEL image digest"
+          git -C gitops commit -m "$title"
+          git -C gitops push --force origin "HEAD:refs/heads/$branch"
+          printf 'Publish %s and update the %s deployment.\n' "$IMAGE_REF" "$CHANNEL" > "$RUNNER_TEMP/gitops-pr.txt"
+          number="$(gh pr list --repo Disease-Prediction-ASET26/disease-prediction-gitops --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            gh pr edit "$number" --repo Disease-Prediction-ASET26/disease-prediction-gitops --title "$title" --body-file "$RUNNER_TEMP/gitops-pr.txt"
+          else
+            pr_url="$(gh pr create --repo Disease-Prediction-ASET26/disease-prediction-gitops --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/gitops-pr.txt")"
+            number="${pr_url##*/}"
+          fi
+          [[ "$number" =~ ^[0-9]+$ ]]
+          head_sha="$(git -C gitops rev-parse HEAD)"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          printf 'number=%s\nhead-sha=%s\n' "$number" "$head_sha" >> "$GITHUB_OUTPUT"
+      - name: Merge the validated GitOps update
+        if: ${{ steps.gitops-pr.outputs.number != '' }}
+        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@fa91ac76885b8cad6548bc1b3cf54682efefdf30
+        with:
+          token: ${{ steps.gitops-token.outputs.token }}
+          number: ${{ steps.gitops-pr.outputs.number }}
+          head-sha: ${{ steps.gitops-pr.outputs.head-sha }}
+          manifest: clusters/proxmox/disease-prediction-ai/${{ needs.prepare.outputs.channel }}/deployment.yaml
+          deployment: ai
+          image: ${{ needs.publish.outputs.image-ref }}
+          source-repository: ${{ github.repository }}
+          source-branch: ${{ needs.prepare.outputs.channel == 'prod' && 'main' || 'develop' }}
+          source-sha: ${{ needs.prepare.outputs.source-revision }}
+          timeout-seconds: '900'

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .classifier import ClassifierStrategy, KNNStrategy, RandomForestStrategy
+from .classifier import (
+    ClassifierStrategy,
+    DecisionTreeStrategy,
+    KNNStrategy,
+    NaiveBayesStrategy,
+    RandomForestStrategy,
+)
 
 
 class ModelFactory(ABC):
@@ -18,3 +24,13 @@ class RandomForestFactory(ModelFactory):
 class KNNFactory(ModelFactory):
     def create_classifier(self) -> ClassifierStrategy:
         return KNNStrategy()
+
+
+class DecisionTreeFactory(ModelFactory):
+    def create_classifier(self) -> ClassifierStrategy:
+        return DecisionTreeStrategy()
+
+
+class NaiveBayesFactory(ModelFactory):
+    def create_classifier(self) -> ClassifierStrategy:
+        return NaiveBayesStrategy()

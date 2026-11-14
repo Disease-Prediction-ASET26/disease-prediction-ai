@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -62,6 +64,7 @@ class ParseResult:
                 severity=_severity_from_weight(link.severity_weight),
                 duration_days=0,
                 is_mapped=True,
+                canonical_symptom=link.canonical_symptom,
             )
             for link in self.linked
         ]
@@ -101,7 +104,7 @@ class ClinicalBertExtractor:
         min_score: float = 0.5,
         pipeline: Any = None,
     ) -> None:
-        self.model_name = model_name
+        self.model_name = os.environ.get("CLINICALBERT_MODEL_PATH", model_name)
         self.keep_labels = {label.lower() for label in keep_labels}
         self.min_score = min_score
         self._pipeline = pipeline
@@ -123,6 +126,10 @@ class ClinicalBertExtractor:
                 aggregation_strategy="first",
             )
         return self._pipeline
+
+    def warm_up(self) -> None:
+        """Load the NER model before the service accepts prediction traffic."""
+        self._get_pipeline()
 
     def extract(self, text: str) -> list[ExtractedEntity]:
         ner = self._get_pipeline()
@@ -168,6 +175,10 @@ class NegspacyNegationDetector:
                 nlp.add_pipe("negex", last=True)
             self._nlp = nlp
         return self._nlp
+
+    def warm_up(self) -> None:
+        """Load the scispaCy pipeline before the service accepts traffic."""
+        self._get_nlp()
 
     def annotate(
         self, text: str, entities: list[ExtractedEntity]
@@ -244,7 +255,7 @@ class SemanticEntityLinker:
     ) -> None:
         self.vocabulary = tuple(vocabulary)
         self.normalised = [normalise_symptom(s) for s in self.vocabulary]
-        self.model_name = model_name
+        self.model_name = os.environ.get("MINILM_MODEL_PATH", model_name)
         self.semantic_threshold = semantic_threshold
         self.fuzzy_threshold = fuzzy_threshold
         self._model = model
@@ -258,6 +269,12 @@ class SemanticEntityLinker:
                 return None
             self._model = SentenceTransformer(self.model_name)
         return self._model
+
+    def warm_up(self) -> None:
+        """Load MiniLM and precompute embeddings for the symptom vocabulary."""
+        model = self._get_model()
+        if model is not None:
+            self._get_vocab_embeddings(model)
 
     def _get_vocab_embeddings(self, model: Any) -> Any:
         if self._vocab_embeddings is None:
@@ -345,6 +362,23 @@ class SymptomParser:
         self.extractor = extractor or ClinicalBertExtractor()
         self.negation_detector = negation_detector or NegspacyNegationDetector()
         self.linker = linker or SemanticEntityLinker(self.vocabulary)
+        self._warmup_lock = Lock()
+        self._warmed_up = False
+
+    def warm_up(self) -> None:
+        """Load parser assets once so readiness reflects prediction ability."""
+        with self._warmup_lock:
+            if self._warmed_up:
+                return
+            for component in (
+                self.extractor,
+                self.negation_detector,
+                self.linker,
+            ):
+                warm_up = getattr(component, "warm_up", None)
+                if warm_up is not None:
+                    warm_up()
+            self._warmed_up = True
 
     def parse(self, text: str) -> ParseResult:
         entities = self.extractor.extract(text)

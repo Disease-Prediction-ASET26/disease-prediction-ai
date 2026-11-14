@@ -19,6 +19,7 @@ class SymptomEntryDTO:
     severity: Severity
     duration_days: int
     is_mapped: bool
+    canonical_symptom: str | None = None
 
 
 @dataclass

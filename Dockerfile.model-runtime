@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+ARG AI_BASE_IMAGE
+ARG PYTHON_IMAGE=python:3.11.18-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
+FROM --platform=$BUILDPLATFORM ${PYTHON_IMAGE} AS model-assets
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_DISABLE_TELEMETRY=1
+WORKDIR /build
+RUN python -m pip install --no-cache-dir huggingface-hub==1.6.0
+COPY model-assets.json download-model-assets.py ./
+RUN python download-model-assets.py /models
+
+FROM ${AI_BASE_IMAGE}
+
+ARG MODEL_VERSION
+ARG MODEL_ASSETS_SHA256
+ARG MODEL_SOURCE_SHA256
+ARG MODEL_BUILD_SHA256
+ARG MODEL_SOURCE_REVISION
+ARG MODEL_TRAINING_REVISION
+ARG MODEL_CLASSIFIER_SHA256
+LABEL org.opencontainers.image.title="Disease Prediction AI model runtime" \
+    org.opencontainers.image.source="https://github.com/Disease-Prediction-ASET26/disease-prediction-ai" \
+    org.opencontainers.image.revision=${MODEL_SOURCE_REVISION} \
+    org.opencontainers.image.description="AI runtime with a verified trained classifier artifact" \
+    org.opencontainers.image.version=${MODEL_VERSION} \
+    org.disease-prediction.classifier.sha256=${MODEL_CLASSIFIER_SHA256} \
+    org.disease-prediction.training.revision=${MODEL_TRAINING_REVISION} \
+    org.disease-prediction.model-assets.sha256=${MODEL_ASSETS_SHA256} \
+    org.disease-prediction.source.sha256=${MODEL_SOURCE_SHA256} \
+    org.disease-prediction.build.sha256=${MODEL_BUILD_SHA256}
+
+ENV DISEASE_MODEL_PATH=/app/models/best.joblib \
+    CLINICALBERT_MODEL_PATH=/app/models/clinical-ner \
+    MINILM_MODEL_PATH=/app/models/minilm \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+COPY --from=model-assets --chown=10001:10001 /models/clinical-ner /app/models/clinical-ner
+COPY --from=model-assets --chown=10001:10001 /models/minilm /app/models/minilm
+COPY --chown=10001:10001 prediction_service ./prediction_service
+COPY --chown=10001:10001 best.joblib /app/models/best.joblib
+COPY --chown=10001:10001 best.manifest.json /app/models/best.manifest.json

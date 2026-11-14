@@ -16,7 +16,7 @@ jobs:
   cleanup:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
       }}
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/preview-cleanup.yml@b4745f8ca8fcb941ad515f24b0c202bad5d321c8 # v1.0.0
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/preview-cleanup.yml@fa91ac76885b8cad6548bc1b3cf54682efefdf30 # multi-platform preview cleanup
     permissions:
       contents: read
       packages: write
