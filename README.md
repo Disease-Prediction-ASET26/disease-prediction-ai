@@ -272,53 +272,52 @@ container or in k3s.
 
 ### Review and publish a model
 
-Use this release flow when the team is ready to promote a model:
+Train and review a candidate on your workstation. The release workflow never
+trains a model. It copies the exact classifier from a digest-pinned runtime
+image, checks its manifest and checksum, then builds an image for each CPU
+architecture.
 
 1. Commit the AI code that produced the model. Put the Kaggle CSV in the local
-   `data/` directory; do not commit the dataset or model files.
+   `data/` directory. Do not commit the dataset or model files.
 2. From the AI repository on Linux or macOS, run:
 
    ```bash
    ./scripts/train-model.sh
    ```
 
-   Review the held-out scores printed by training and the metadata in
-   `models/best.manifest.json`. Test the model with representative inputs and
-   confirm the team accepts the result. Training and this review happen outside
-   the cluster.
-3. After approval, wait for CI to publish the AI base image on `develop`. Make
-   an annotated release tag on the reviewed `develop` commit and push it:
+   Review the held-out scores in `models/best.manifest.json` and check the
+   model with representative inputs. Record its full SHA-256:
 
    ```bash
-   git tag -a model-runtime-dev-v0.1.0 develop -m "Publish dev model runtime"
-   git push origin model-runtime-dev-v0.1.0
+   sha256sum models/best.joblib
    ```
 
-   The tag starts the release workflow. It confirms that the tagged commit is
-   on `develop`, resolves the current AI base tag to its immutable digest,
-   downloads Kaggle dataset version 2 from the dataset owner's
-   [pinned GitHub mirror](https://github.com/itachi9604/healthcare-chatbot/blob/e4194028a436f6e9beed56bea6f424018734a651/Data/dataset.csv),
-   restores its column header, and verifies the original CSV checksum. It then
-   retrains with the tagged source revision, scans the image with Trivy, and
-   pushes it to GHCR. The workflow opens or updates a pull request with the
-   immutable dev digest in the Oracle GitOps repository. Merge that pull
-   request to let Argo CD sync the candidate. This requires a GitHub App
-   installed on `disease-prediction-gitops` with Contents and Pull requests
-   write access; set `GITOPS_CLIENT_ID` to the app Client ID and
-   `GITOPS_APP_PRIVATE_KEY` to the complete PEM key as Actions secrets in
-   this repository. The local script below can publish an already
-   reviewed local artifact when GHCR access is available.
-4. When the dev candidate is accepted for production, publish it using the
-   production base image digest:
+3. Package the reviewed local files as a candidate image, following
+   [Publish a trained model runtime](#publish-a-trained-model-runtime). Record
+   the candidate image digest and the classifier SHA-256. The candidate image
+   can contain one CPU architecture: the release workflow uses it only as an
+   immutable source for the classifier.
+4. Update `model-release-dev.json` with the candidate image digest and the
+   classifier SHA-256. Open and merge a pull request into `develop`. After CI
+   passes, the release workflow uses the base image built by that exact CI run
+   and the selected classifier. It builds, scans, and runs an offline
+   prediction on native AMD64 and ARM64 runners. It publishes an image index
+   and opens a GitOps pull request for the Proxmox dev deployment. Merge the
+   GitOps pull request to deploy it.
+5. After the team accepts the dev image for production, run **Publish model
+   runtime** on `main` with channel `prod`. Supply the production base image
+   digest, the accepted dev runtime image digest, and the same classifier
+   SHA-256. Review and merge the production GitOps pull request.
 
-   ```bash
-   git tag -a model-runtime-prod-v0.1.0 main -m "Publish production model runtime"
-   git push origin model-runtime-prod-v0.1.0
-   ```
-
-   Review and pin the resulting digest in the production GitOps configuration.
-   Do not push the model file or dataset to Git. Production loads the reviewed
-   classifier from the image and does not train it.
+The workflow requires a GitHub App installed on `disease-prediction-gitops`
+with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
+Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
+secrets in this repository. The classifier source image, base image, and output
+image are pinned by digest; the workflow records them in its run summary.
+Subsequent changes merged into `develop` rebuild the runtime with the classifier
+pinned in `model-release-dev.json`. To rerun a release manually, select the
+matching branch and channel and supply its base image, source runtime image,
+and classifier checksum.
 
 The runtime image contains the trained classifier and pinned ClinicalBERT and
 MiniLM inference assets. `/ready` loads these local files before the pod
@@ -478,8 +477,8 @@ pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/
 
 The released runtime image includes pinned ClinicalBERT and MiniLM weights.
 Local Python runs that do not set model paths load the models from Hugging Face
-on first use and use the normal local cache. The release workflow pins the CSV
-by SHA-256 and records its checksum in the classifier manifest.
+on first use and use the normal local cache. Training records the dataset
+checksum in the classifier manifest.
 
 ## Docker images
 
@@ -500,32 +499,26 @@ offline mode. A pod cannot receive prediction traffic until this completes.
 
 ### Publish a trained model runtime
 
-To publish an already reviewed local artifact, log in to GHCR with package
-write access and install the Trivy version pinned in the shared CI repository.
-The regular dev and production images contain the AI code and dependencies.
-They exclude `models/` and `data/`. The manual release workflow is preferred
-for a tracked release because it checks the training CSV checksum and records
-the source revision. The local script builds the same immutable runtime image:
+Use this command to put an already reviewed local classifier in GHCR as a
+candidate. Run it on a native AMD64 or ARM64 host with Docker Buildx, Trivy,
+and package write access. Replace the base digest, architecture, and unique
+candidate tag with your values:
 
 ```sh
 docker login ghcr.io
 scripts/publish-model-runtime.sh dev \
-  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest>
+  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest> \
+  amd64 candidate-<unique-name> models
 ```
 
-Use `prod` and the production base image for a production model runtime. The
-script requires a digest-pinned base image, verifies the model checksum and
-manifest, downloads only the pinned model files, scans for fixable HIGH and
-CRITICAL vulnerabilities with Trivy, builds for Linux ARM64, and pushes a
-unique tag based on the model, manifest, source code, build recipe, model asset
-set, and base image digest. It prints the resulting image digest. The AI readiness probe
-checks runtime compatibility when it loads the model. Pin the image digest in
-GitOps. Use the Trivy version pinned by the shared CI workflow.
-The runtime image stores `best.joblib` at `/app/models/best.joblib`; the
-classifier needs no download or mount at startup. Keep the source dataset in
-the ignored `data/` directory and never include it in the runtime image.
-Joblib files can execute code while loading, so package only artifacts trained
-and reviewed by the project team.
+The script checks the artifact manifest, downloads pinned inference files,
+scans for fixable HIGH and CRITICAL vulnerabilities, runs a prediction without
+network access, and publishes the tested image. Record its printed digest for
+the GitHub release workflow. The workflow builds and checks both architectures
+and publishes their combined image index. Pin the resulting index digest in
+GitOps. Keep the source dataset in the ignored `data/` directory and never
+include it in the runtime image. Joblib files can execute code while loading,
+so package only artifacts trained and reviewed by the project team.
 
 The published model runtime contains the classifier and both pinned NLP model
 directories. It does not need a Hugging Face cache volume or Hub network access
