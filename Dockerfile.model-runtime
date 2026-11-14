@@ -19,11 +19,15 @@ ARG MODEL_ASSETS_SHA256
 ARG MODEL_SOURCE_SHA256
 ARG MODEL_BUILD_SHA256
 ARG MODEL_SOURCE_REVISION
+ARG MODEL_TRAINING_REVISION
+ARG MODEL_CLASSIFIER_SHA256
 LABEL org.opencontainers.image.title="Disease Prediction AI model runtime" \
     org.opencontainers.image.source="https://github.com/Disease-Prediction-ASET26/disease-prediction-ai" \
     org.opencontainers.image.revision=${MODEL_SOURCE_REVISION} \
     org.opencontainers.image.description="AI runtime with a verified trained classifier artifact" \
     org.opencontainers.image.version=${MODEL_VERSION} \
+    org.disease-prediction.classifier.sha256=${MODEL_CLASSIFIER_SHA256} \
+    org.disease-prediction.training.revision=${MODEL_TRAINING_REVISION} \
     org.disease-prediction.model-assets.sha256=${MODEL_ASSETS_SHA256} \
     org.disease-prediction.source.sha256=${MODEL_SOURCE_SHA256} \
     org.disease-prediction.build.sha256=${MODEL_BUILD_SHA256}

@@ -1,0 +1,4 @@
+{
+  "classifier_image": "ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:66bd002b656519ab59e5867c667c803e4ddebf5dc99b52e3d4d98d7c242c0ac1",
+  "classifier_sha256": "ed9780ccfa2a3aba2793a5955ed1652de0a2c07916fb4976f95b8c6d93647cb0"
+}

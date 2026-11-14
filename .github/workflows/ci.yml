@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@5d4a668154db4c894c6f5300f2e6a3c14649a438 # GHCR publisher retries transient blob failures
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@1f3c567c6e3f5936c24bed6eaf7e4a4b04145937 # multi-platform publisher
     permissions:
       contents: read
       packages: write
