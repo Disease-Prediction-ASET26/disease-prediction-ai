@@ -305,24 +305,25 @@ architecture.
    and opens a GitOps pull request for the Proxmox dev deployment. The workflow
    merges the update after GitOps validation and secret scanning pass. Argo CD
    then deploys the image.
-5. After the team accepts the dev image for production, run **Publish model
-   runtime** on `main` with channel `prod`. Supply the production base image
-   digest, the accepted dev runtime image digest, and the same classifier
-   SHA-256. The workflow merges the production GitOps update after its checks
-   pass.
+5. After the team accepts the dev image for production, update
+   `model-release-prod.json` with the accepted dev runtime image digest and
+   classifier SHA-256. Merge the change into `develop`, then promote it to
+   `main` in a pull request. After CI passes, the release workflow builds the
+   production runtime and merges its GitOps update after the checks pass.
 
 The workflow requires a GitHub App installed on `disease-prediction-gitops`
 with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
 Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
 secrets in this repository. The classifier source image, base image, and output
 image are pinned by digest; the workflow records them in its run summary.
-Subsequent changes merged into `develop` rebuild the runtime with the classifier
-pinned in `model-release-dev.json`. To rerun a release manually, select the
-matching branch and channel and supply its base image, source runtime image,
-and classifier checksum. Releases for each environment run one at a time,
-and pending releases wait in a queue. A failed GitOps check leaves its pull
-request open for inspection. The workflow refuses to deploy an outdated source
-revision.
+Subsequent changes merged into `develop` or `main` rebuild the matching runtime
+with the classifier pinned for that environment. To rerun a release manually,
+select the matching branch and channel and supply the base image from that
+branch's CI run. The source runtime image and classifier checksum must match
+the environment's release file. Releases for each environment run one at a
+time, and pending releases wait in a queue. A failed GitOps check leaves its
+pull request open for inspection. The workflow refuses to deploy an outdated
+source revision.
 
 The runtime image contains the trained classifier and pinned ClinicalBERT and
 MiniLM inference assets. `/ready` loads these local files before the pod

@@ -3,7 +3,7 @@ name: Publish model runtime
 on:
   workflow_run:
     workflows: [CI]
-    branches: [develop]
+    branches: [develop, main]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -19,11 +19,11 @@ on:
         required: true
         type: string
       classifier_image:
-        description: Reviewed runtime image containing the classifier, pinned by sha256 digest
+        description: Classifier image digest from the selected channel's release file
         required: true
         type: string
       classifier_sha256:
-        description: SHA-256 of the reviewed best.joblib file
+        description: Classifier SHA-256 from the selected channel's release file
         required: true
         type: string
 
@@ -31,13 +31,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: model-runtime-${{ inputs.channel || 'dev' }}
+  group: model-runtime-${{ inputs.channel || (github.event.workflow_run.head_branch == 'main' && 'prod' || 'dev') }}
   cancel-in-progress: false
   queue: max
 
 jobs:
   prepare:
-    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop') || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.head_branch == 'develop' || github.event.workflow_run.head_branch == 'main')) || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
     outputs:
       channel: ${{ steps.target.outputs.channel }}
       base-image: ${{ steps.target.outputs.base-image }}
@@ -68,6 +68,7 @@ jobs:
           INPUT_BASE_IMAGE: ${{ inputs.ai_base_image }}
           INPUT_CLASSIFIER_IMAGE: ${{ inputs.classifier_image }}
           INPUT_CLASSIFIER_SHA256: ${{ inputs.classifier_sha256 }}
+          CI_BRANCH: ${{ github.event.workflow_run.head_branch }}
           CI_REVISION: ${{ github.event.workflow_run.head_sha }}
           CI_RUN_ID: ${{ github.event.workflow_run.id }}
           CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
@@ -75,32 +76,37 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == workflow_run ]]; then
-            channel=dev
+            case "$CI_BRANCH" in
+              develop) channel=dev; base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev ;;
+              main) channel=prod; base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai ;;
+              *) echo 'Unsupported source branch.' >&2; exit 1 ;;
+            esac
             source_revision="$CI_REVISION"
             [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$CI_RUN_ID" =~ ^[0-9]+$ && "$CI_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
-            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/develop" --jq .sha)"
+            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CI_BRANCH" --jq .sha)"
             if [[ "$branch_head" != "$source_revision" ]]; then
-              echo 'A newer develop commit exists; skip this superseded release.' >&2
+              echo "A newer $CI_BRANCH commit exists; skip this superseded release." >&2
               exit 1
             fi
-            base_repo=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev
             base_tag="sha-$source_revision-$CI_RUN_ID-$CI_RUN_ATTEMPT"
             base_digest="$(docker buildx imagetools inspect "$base_repo:$base_tag" | awk '/^Digest:/ {print $2; exit}')"
             base_image="$base_repo@$base_digest"
-            classifier_image="$(python3 -c 'import json; print(json.load(open("model-release-dev.json"))["classifier_image"])')"
-            classifier_sha256="$(python3 -c 'import json; print(json.load(open("model-release-dev.json"))["classifier_sha256"])')"
           else
             channel="$INPUT_CHANNEL"
             source_revision="$GITHUB_SHA"
             base_image="$INPUT_BASE_IMAGE"
-            classifier_image="$INPUT_CLASSIFIER_IMAGE"
-            classifier_sha256="$INPUT_CLASSIFIER_SHA256"
           fi
           case "$channel" in
             dev) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev ;;
             prod) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai ;;
             *) echo 'Unsupported channel.' >&2; exit 1 ;;
           esac
+          classifier_image="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["classifier_image"])' "model-release-$channel.json")"
+          classifier_sha256="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["classifier_sha256"])' "model-release-$channel.json")"
+          if [[ "$EVENT_NAME" == workflow_dispatch && ( "$INPUT_CLASSIFIER_IMAGE" != "$classifier_image" || "$INPUT_CLASSIFIER_SHA256" != "$classifier_sha256" ) ]]; then
+            echo "Manual releases must use the classifier pinned in model-release-$channel.json." >&2
+            exit 1
+          fi
           [[ "$base_image" == "$expected_base"@sha256:* && "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]
           [[ "$classifier_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:* && "$classifier_image" =~ @sha256:[0-9a-f]{64}$ ]]
           [[ "$classifier_sha256" =~ ^[0-9a-f]{64}$ && "$source_revision" =~ ^[0-9a-f]{40}$ ]]
@@ -298,14 +304,20 @@ jobs:
         id: current
         env:
           EVENT_NAME: ${{ github.event_name }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
           SOURCE_REVISION: ${{ needs.prepare.outputs.source-revision }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == workflow_run ]]; then
-            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/develop" --jq .sha)"
+            case "$CHANNEL" in
+              dev) branch=develop ;;
+              prod) branch=main ;;
+              *) echo 'Unsupported channel.' >&2; exit 1 ;;
+            esac
+            branch_head="$(gh api "repos/$GITHUB_REPOSITORY/commits/$branch" --jq .sha)"
             if [[ "$branch_head" != "$SOURCE_REVISION" ]]; then
-              echo 'A newer develop commit exists; skip the GitOps update.'
+              echo "A newer $branch commit exists; skip the GitOps update."
               echo 'update=false' >> "$GITHUB_OUTPUT"
               exit 0
             fi
