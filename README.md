@@ -490,20 +490,140 @@ checksum in the classifier manifest.
 
 ## Docker images
 
-The shared Compose setup is in
-[`disease-prediction-docker`](../disease-prediction-docker). It uses
-`Dockerfile.local` for the source-mounted developer service,
-`Dockerfile.dev` for a deployable dev image, and `Dockerfile.prod` for the
-production runtime image. Each build excludes the local `data/` and `models/`
-folders. The runtime images use CPU-only PyTorch. The published model runtime
-adds the pinned inference weights to the image.
+Run the commands below from the AI repository unless a step names another
+repository. Builds need Docker and network access to download dependencies.
+The model downloads and images need several gigabytes of disk space.
 
-The API can start without a trained classifier, but `/predict` returns `503`
-until `models/best.joblib` is present at the configured model path. `/ready`
-returns success only after the classifier and manifest have been verified and
-loaded, and the parser models have been loaded. `/health` remains a process
-check. The published runtime image loads the parser models from local files in
-offline mode. A pod cannot receive prediction traffic until this completes.
+| File | Purpose | Model files |
+| --- | --- | --- |
+| `Dockerfile.local` | Development server, training, and Python tests. Uses Uvicorn reload. | Mount the classifier. Parser models can download on first use. |
+| `Dockerfile.dev` | Non-root dev API image with debug logging. | Supply the classifier and parser models separately. |
+| `Dockerfile.prod` | Non-root production base API image with info logging. | Supply the classifier and parser models separately. |
+| `Dockerfile.model-runtime` | Add a reviewed classifier and pinned parser models to a dev or production base image. | Included in the resulting image. |
+
+All images expose port `8000`. The dev and production base images run in
+Hugging Face offline mode and expect parser files at `/app/models/clinical-ner`
+and `/app/models/minilm`. A base image alone does not contain those files or
+the classifier. The model runtime includes them and starts offline.
+
+### Run the full stack
+
+Follow the [shared Docker setup](https://github.com/Disease-Prediction-ASET26/disease-prediction-docker)
+for the sibling repositories and local secrets. Put `best.joblib` and its
+`best.manifest.json` in this repository's `models/` directory. To train a local
+classifier, see [Model training and release](#model-training-and-release).
+
+From `disease-prediction-docker`, start the local profile:
+
+```bash
+docker compose --profile local up --build
+```
+
+The API is at `http://localhost:8000`. The local profile mounts the source,
+`models/`, and `data/`. It keeps downloaded Hugging Face files in a Docker
+volume. Run the Python tests in another terminal:
+
+```bash
+docker compose exec ai-local python -m pytest tests
+```
+
+For the dev or production base image profiles, first download the pinned parser
+models into the AI repository's `models/` directory. From that repository, use
+an active Python virtual environment:
+
+```bash
+python -m pip install huggingface-hub==1.6.0
+python download-model-assets.py models
+```
+
+The script uses `model-assets.json` and creates `models/clinical-ner` and
+`models/minilm`. Then, from `disease-prediction-docker`, run one profile:
+
+```bash
+docker compose --profile dev up --build
+# Or:
+docker compose --profile prod up --build
+```
+
+The AI ports are `18000` for dev and `28000` for production. Compose mounts
+`models/` read-only; it does not build `Dockerfile.model-runtime`. Run
+`docker compose --profile local down` to stop the local stack; use the matching
+profile for the other stacks. Data and model files are kept.
+
+### Build and check a base image
+
+From the AI repository, build the image you need:
+
+```bash
+docker build -f Dockerfile.local -t disease-prediction-ai:local .
+docker build -f Dockerfile.dev -t disease-prediction-ai:dev .
+docker build -f Dockerfile.prod -t disease-prediction-ai:prod .
+```
+
+The local image includes test dependencies. To run the tests in it:
+
+```bash
+docker run --rm disease-prediction-ai:local python -m pytest tests
+```
+
+For the dev image, prepare `models/best.joblib`, `models/best.manifest.json`,
+`models/clinical-ner`, and `models/minilm` as described above. Then run:
+
+```bash
+docker run --rm --name ai-check \
+  -v "$PWD/models:/app/models:ro" \
+  -p 127.0.0.1:18000:8000 disease-prediction-ai:dev
+```
+
+In another terminal, check `curl --fail http://localhost:18000/ready`. Model
+loading can take time. `/health` only checks the process; `/ready` loads the
+classifier and parser and reports whether predictions can run. Send the sample
+request in [HTTP API](#http-api) to port `18000`. Stop with Ctrl+C. To check
+`Dockerfile.prod`, use its image and a free host port instead.
+
+### How the model runtime is built
+
+`Dockerfile.model-runtime` takes an existing API base image through the required
+`AI_BASE_IMAGE` build argument. Its asset stage downloads the exact
+ClinicalBERT and MiniLM files and revisions listed in `model-assets.json`. The
+final stage copies those files, the current Python service, `best.joblib`, and
+`best.manifest.json` into the base image. It sets their runtime paths and
+Hugging Face offline mode. Build arguments also record the model version,
+checksums, and source revisions in image labels.
+
+The Dockerfile does not train a classifier. The regular `.dockerignore`
+excludes `models/` and joblib files. The Dockerfile therefore needs a separate
+build context with the reviewed classifier and manifest at its root. The
+publish script prepares this context, verifies the artifact, builds and scans
+the image, tests offline inference, and pushes the result. See
+[Publish a trained model runtime](#publish-a-trained-model-runtime) for the
+release command.
+
+To build a local image without publishing, first build `disease-prediction-ai:dev`
+and prepare a reviewed classifier and manifest in `models/`. From the AI
+repository, run:
+
+```bash
+MODEL_CONTEXT=$(mktemp -d)
+cp Dockerfile.model-runtime model-assets.json download-model-assets.py "$MODEL_CONTEXT/"
+cp -R prediction_service "$MODEL_CONTEXT/"
+cp models/best.joblib models/best.manifest.json "$MODEL_CONTEXT/"
+docker build -f "$MODEL_CONTEXT/Dockerfile.model-runtime" \
+  --build-arg AI_BASE_IMAGE=disease-prediction-ai:dev \
+  -t disease-prediction-ai:model-test "$MODEL_CONTEXT"
+```
+
+Start and check it without mounting model files:
+
+```bash
+docker run --rm --name ai-model-check \
+  -p 127.0.0.1:18000:8000 disease-prediction-ai:model-test
+```
+
+Check `http://localhost:18000/ready` after startup. Stop with Ctrl+C and remove
+the temporary context with `rm -r -- "$MODEL_CONTEXT"`. This local build is
+for testing; use the publish script and release workflow for reviewed images.
+Only load joblib files from a trusted source: they can execute code.
 
 ### Publish a trained model runtime
 
@@ -525,13 +645,7 @@ network access, and publishes the tested image. Record its printed digest for
 the GitHub release workflow. The workflow builds and checks both architectures
 and publishes their combined image index. Pin the resulting index digest in
 GitOps. Keep the source dataset in the ignored `data/` directory and never
-include it in the runtime image. Joblib files can execute code while loading,
-so package only artifacts trained and reviewed by the project team.
-
-The published model runtime contains the classifier and both pinned NLP model
-directories. It does not need a Hugging Face cache volume or Hub network access
-at startup. The model revisions and files included in the image are listed in
-`model-assets.json`.
+include it in the runtime image.
 
 ---
 
