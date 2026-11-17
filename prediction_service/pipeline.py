@@ -45,6 +45,15 @@ class PredictionPipeline:
         """Run only the NLP stage (useful for inspection/debugging)."""
         return self._parser.parse(text)
 
+    @property
+    def classifier(self) -> DiseaseClassifier:
+        """The trained classifier, for callers that re-predict from entries.
+
+        The adaptive follow-up loop reuses the same trained model to re-rank
+        after each answered question, without re-running the NLP stage.
+        """
+        return self._classifier
+
     def warm_up(self) -> None:
         """Load the NLP assets needed before serving prediction requests."""
         self._parser.warm_up()

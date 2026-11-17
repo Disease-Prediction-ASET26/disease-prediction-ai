@@ -25,11 +25,18 @@ from functools import lru_cache
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from .associations import DEFAULT_DATASET_PATH, SymptomAssociationIndex
+from .followup import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_MAX_ROUNDS,
+    FollowUpService,
+)
 from .knowledge import (
     DEFAULT_DESCRIPTION_PATH,
     DEFAULT_PRECAUTION_PATH,
     DiseaseKnowledgeBase,
 )
+from .models import DiseasePrediction
 from .persistence import DEFAULT_MODEL_PATH, load_strategy
 from .pipeline import PredictionPipeline
 from .red_flags import RedFlagEngine, Urgency
@@ -72,16 +79,87 @@ class PredictionItem(BaseModel):
     explanation: ExplanationItem | None = None
 
 
+class FollowUpQuestionItem(BaseModel):
+    symptom: str = Field(
+        ...,
+        description="Canonical symptom name to answer yes/no about.",
+    )
+    question: str = Field(
+        ...,
+        description="Human-readable yes/no question to show the patient.",
+    )
+    top_disease: str = Field(
+        ...,
+        description="Current most-likely disease the question tries to confirm.",
+    )
+    confidence: float = Field(
+        ...,
+        description="Current confidence in the top disease (0..1).",
+    )
+
+
 class PredictResponse(BaseModel):
     predictions: list[PredictionItem]
     active_symptoms: list[str]
     disclaimer: str
+    needs_follow_up: bool = Field(
+        default=False,
+        description="True when confidence is below the threshold and a "
+        "follow-up question is offered.",
+    )
+    follow_up: FollowUpQuestionItem | None = Field(
+        default=None,
+        description="A yes/no question that would sharpen the prediction, or "
+        "null when none is useful.",
+    )
 
 
 class DiseaseInfoResponse(BaseModel):
     disease_name: str
     description: str | None = None
     precautions: list[str] = Field(default_factory=list)
+
+
+class FollowUpAnswer(BaseModel):
+    symptom: str = Field(
+        ...,
+        min_length=1,
+        description="Canonical symptom name the question was about.",
+    )
+    present: bool = Field(
+        ...,
+        description="The patient's yes (true) / no (false) answer.",
+    )
+
+
+class FollowUpRequest(BaseModel):
+    confirmed_symptoms: list[str] = Field(
+        default_factory=list,
+        description="Symptoms known present so far (original parse + every "
+        "'yes'), carried back by the client each turn.",
+    )
+    denied_symptoms: list[str] = Field(
+        default_factory=list,
+        description="Symptoms answered 'no' so far, carried back so they are "
+        "never asked again.",
+    )
+    answer: FollowUpAnswer | None = Field(
+        default=None,
+        description="The answer to the previous follow-up question. Omit on "
+        "the first follow-up call that only seeds the carried symptoms.",
+    )
+    rounds_used: int = Field(
+        default=0,
+        ge=0,
+        description="How many follow-up questions have already been answered "
+        "(used to cap the loop).",
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=41,
+        description="How many ranked diseases to return (defaults to the model's).",
+    )
 
 
 class MapSymptomsRequest(BaseModel):
@@ -191,6 +269,43 @@ def get_red_flag_engine() -> RedFlagEngine:
     return _build_red_flag_engine()
 
 
+@lru_cache(maxsize=1)
+def _build_associations() -> SymptomAssociationIndex:
+    """Build the disease -> symptom association index once and cache it."""
+    dataset_path = os.environ.get("DISEASE_DATASET_PATH", str(DEFAULT_DATASET_PATH))
+    return SymptomAssociationIndex.from_csv(dataset_path)
+
+
+def get_associations() -> SymptomAssociationIndex:
+    """FastAPI dependency: return the cached symptom association index."""
+    return _build_associations()
+
+
+def _follow_up_settings() -> tuple[float, int]:
+    """Read the confidence threshold and round cap from the environment."""
+    threshold = float(
+        os.environ.get("DISEASE_FOLLOWUP_THRESHOLD", str(DEFAULT_CONFIDENCE_THRESHOLD))
+    )
+    max_rounds = int(
+        os.environ.get("DISEASE_FOLLOWUP_MAX_ROUNDS", str(DEFAULT_MAX_ROUNDS))
+    )
+    return threshold, max_rounds
+
+
+def get_follow_up_service(
+    pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
+    associations: SymptomAssociationIndex = Depends(get_associations),  # noqa: B008
+) -> FollowUpService:
+    """FastAPI dependency: build the follow-up service over the live model."""
+    threshold, max_rounds = _follow_up_settings()
+    return FollowUpService(
+        pipeline.classifier,
+        associations,
+        confidence_threshold=threshold,
+        max_rounds=max_rounds,
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -217,6 +332,7 @@ def predict(
     pipeline: PredictionPipeline = Depends(get_pipeline),  # noqa: B008
     knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
     specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
+    follow_up: FollowUpService = Depends(get_follow_up_service),  # noqa: B008
 ) -> PredictResponse:
     parse_result, predictions = pipeline.predict_detailed(request.text)
 
@@ -226,32 +342,121 @@ def predict(
             detail="No known symptoms could be extracted from the input text.",
         )
 
+    question = _first_follow_up(follow_up, parse_result.active_symptoms())
+
     if request.top_k is not None:
         predictions = predictions[: request.top_k]
 
     return PredictResponse(
-        predictions=[
-            PredictionItem(
-                rank=p.rank,
-                disease_name=p.disease_name,
-                probability=p.probability,
-                specialty=specialty.specialty_for(p.disease_name),
-                description=knowledge.describe(p.disease_name),
-                precautions=knowledge.precautions_for(p.disease_name),
-                explanation=(
-                    ExplanationItem(
-                        summary=p.explanation.summary,
-                        contribution_weights=p.explanation.contribution_weights,
-                    )
-                    if p.explanation is not None
-                    else None
-                ),
-            )
-            for p in predictions
-        ],
+        predictions=_to_prediction_items(predictions, knowledge, specialty),
         active_symptoms=parse_result.active_symptoms(),
         disclaimer="This is not a medical diagnosis.",
+        needs_follow_up=question is not None,
+        follow_up=question,
     )
+
+
+@app.post("/predict/followup", response_model=PredictResponse)
+def predict_followup(
+    request: FollowUpRequest,
+    knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
+    specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
+    follow_up: FollowUpService = Depends(get_follow_up_service),  # noqa: B008
+) -> PredictResponse:
+    """Continue the adaptive loop after a yes/no follow-up answer.
+
+    The client carries the symptoms confirmed and denied so far and the latest
+    answer; the service rebuilds the symptom set, re-ranks, and either offers
+    the next question (confidence still below the threshold) or returns the
+    final ranking. The service is stateless: no conversation is stored here.
+    """
+    confirmed = list(request.confirmed_symptoms)
+    denied = list(request.denied_symptoms)
+    rounds_used = request.rounds_used
+
+    if request.answer is not None:
+        rounds_used += 1
+        if request.answer.present:
+            confirmed.append(request.answer.symptom)
+        else:
+            denied.append(request.answer.symptom)
+
+    if not confirmed:
+        raise HTTPException(
+            status_code=422,
+            detail="No confirmed symptoms to predict from.",
+        )
+
+    outcome = follow_up.evaluate(
+        confirmed_symptoms=confirmed,
+        denied_symptoms=denied,
+        rounds_used=rounds_used,
+    )
+
+    predictions = outcome.predictions
+    if request.top_k is not None:
+        predictions = predictions[: request.top_k]
+
+    question = (
+        FollowUpQuestionItem(
+            symptom=outcome.question.symptom,
+            question=outcome.question.question,
+            top_disease=outcome.question.top_disease,
+            confidence=outcome.question.confidence,
+        )
+        if outcome.question is not None
+        else None
+    )
+
+    return PredictResponse(
+        predictions=_to_prediction_items(predictions, knowledge, specialty),
+        active_symptoms=outcome.confirmed_symptoms,
+        disclaimer="This is not a medical diagnosis.",
+        needs_follow_up=question is not None,
+        follow_up=question,
+    )
+
+
+def _first_follow_up(
+    follow_up: FollowUpService, active_symptoms: list[str]
+) -> FollowUpQuestionItem | None:
+    """Offer a follow-up question for a low-confidence initial prediction."""
+    outcome = follow_up.evaluate(confirmed_symptoms=active_symptoms)
+    if outcome.question is None:
+        return None
+    return FollowUpQuestionItem(
+        symptom=outcome.question.symptom,
+        question=outcome.question.question,
+        top_disease=outcome.question.top_disease,
+        confidence=outcome.question.confidence,
+    )
+
+
+def _to_prediction_items(
+    predictions: list[DiseasePrediction],
+    knowledge: DiseaseKnowledgeBase,
+    specialty: SpecialtyMapper,
+) -> list[PredictionItem]:
+    """Enrich ranked predictions with specialty, description and precautions."""
+    return [
+        PredictionItem(
+            rank=p.rank,
+            disease_name=p.disease_name,
+            probability=p.probability,
+            specialty=specialty.specialty_for(p.disease_name),
+            description=knowledge.describe(p.disease_name),
+            precautions=knowledge.precautions_for(p.disease_name),
+            explanation=(
+                ExplanationItem(
+                    summary=p.explanation.summary,
+                    contribution_weights=p.explanation.contribution_weights,
+                )
+                if p.explanation is not None
+                else None
+            ),
+        )
+        for p in predictions
+    ]
 
 
 @app.post("/map-symptoms", response_model=MapSymptomsResponse)
