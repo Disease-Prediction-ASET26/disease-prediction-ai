@@ -51,7 +51,8 @@ concurrency:
 
 jobs:
   prepare:
-    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') || (github.event_name == 'workflow_call' && ((inputs.channel == 'dev' && inputs.source_branch == 'develop') || (inputs.channel == 'prod' && inputs.source_branch == 'main'))) || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
+    # Reusable workflows keep the caller's event name, so identify a call by its inputs.
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') || ((inputs.channel == 'dev' && inputs.source_branch == 'develop') || (inputs.channel == 'prod' && inputs.source_branch == 'main')) || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
     outputs:
       channel: ${{ steps.target.outputs.channel }}
       base-image: ${{ steps.target.outputs.base-image }}
