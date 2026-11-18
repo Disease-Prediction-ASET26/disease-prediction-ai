@@ -153,7 +153,7 @@ jobs:
       && github.event.action != 'closed' }}
     needs:
     - build
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@71c3544937d01a29962ff0949906e1cd9953145d # pinned shared action
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/dependency-scan.yml@04d1fdf77f2275fcda89725a8797450fa253ff31 # shared advisory policy
     permissions:
       contents: read
       packages: read
