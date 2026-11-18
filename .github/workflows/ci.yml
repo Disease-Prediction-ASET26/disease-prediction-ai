@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@f90c52c9522b423eb183a9cf166a500ae59ef5ad # SemVer multi-platform publisher
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@aeed2f2a56af2c9e3935cecd6c66e761de546857 # SemVer multi-platform publisher
     permissions:
       contents: read
       packages: write

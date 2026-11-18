@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Disease-Prediction-ASET26/disease-prediction-ci
-          ref: f90c52c9522b423eb183a9cf166a500ae59ef5ad
+          ref: aeed2f2a56af2c9e3935cecd6c66e761de546857
           path: shared-ci
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -521,7 +521,7 @@ jobs:
           printf 'number=%s\nhead-sha=%s\n' "$number" "$head_sha" >> "$GITHUB_OUTPUT"
       - name: Merge the validated GitOps update
         if: ${{ steps.gitops-pr.outputs.number != '' }}
-        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@f90c52c9522b423eb183a9cf166a500ae59ef5ad
+        uses: Disease-Prediction-ASET26/disease-prediction-ci/actions/merge-gitops@aeed2f2a56af2c9e3935cecd6c66e761de546857
         with:
           token: ${{ steps.gitops-token.outputs.token }}
           number: ${{ steps.gitops-pr.outputs.number }}
