@@ -189,7 +189,7 @@ jobs:
       version-file: VERSION
   model-runtime:
     name: model-runtime / publish
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
+    if: ${{ github.event_name == 'push' && github.ref_name == 'develop' }}
     needs:
       - containerize
     uses: ./.github/workflows/publish-model-runtime.yml
