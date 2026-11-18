@@ -644,15 +644,21 @@ Only load joblib files from a trusted source: they can execute code.
 
 Use this command to put an already reviewed local classifier in GHCR as a
 candidate. Run it on a native AMD64 or ARM64 host with Docker Buildx, Trivy,
-and package write access. Replace the base digest, architecture, and valid
-SemVer prerelease tag with your values:
+and package write access. Replace the base tag and digest, architecture, and
+run metadata with values from a successful build of the same source revision:
 
 ```sh
 docker login ghcr.io
+MODEL_VERSION=0.1.2-dev.<short-sha>.<run-id>.<attempt> \
 scripts/publish-model-runtime.sh dev \
-  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest> \
-  amd64 0.1.2-dev.local.1.1 models
+  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev:0.1.2-dev.<short-sha>.<run-id>.<attempt>@sha256:<base-digest> \
+  amd64 stage-<run-id>-amd64 models
 ```
+
+The base reference includes its SemVer tag and digest. `MODEL_VERSION` must
+match the checked-out source revision and the base image tag. For a manual
+runtime build, the base image may come from an earlier run for that same
+revision.
 
 The script checks the artifact manifest, downloads pinned inference files,
 scans for fixable HIGH and CRITICAL vulnerabilities, runs a prediction without
