@@ -29,7 +29,7 @@ on:
           - dev
           - prod
       ai_base_image:
-        description: Multi-platform AI base image pinned by sha256 digest
+        description: Multi-platform AI base image pinned by version tag and sha256 digest
         required: true
         type: string
       classifier_image:
@@ -116,7 +116,7 @@ jobs:
             fi
             base_tag="$(python3 shared-ci/actions/registry/version.py VERSION --event-file "$GITHUB_EVENT_PATH" --ref "$SOURCE_REF" --sha "$source_revision" --run-id "$CI_RUN_ID" --run-attempt "$CI_RUN_ATTEMPT" | sed -n 's/^tag=//p')"
             base_digest="$(docker buildx imagetools inspect "$base_repo:$base_tag" | awk '/^Digest:/ {print $2; exit}')"
-            base_image="$base_repo@$base_digest"
+            base_image="$base_repo:$base_tag@$base_digest"
           else
             channel="$INPUT_CHANNEL"
             source_revision="$SOURCE_REVISION"
@@ -137,13 +137,27 @@ jobs:
             echo "Manual releases must use the classifier pinned in model-release-$channel.json." >&2
             exit 1
           fi
-          [[ "$base_image" == "$expected_base"@sha256:* && "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]
-          [[ "$classifier_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:* && "$classifier_image" =~ @sha256:[0-9a-f]{64}$ ]]
-          [[ "$classifier_sha256" =~ ^[0-9a-f]{64}$ && "$source_revision" =~ ^[0-9a-f]{40}$ ]]
           version_output="$(python3 shared-ci/actions/registry/version.py VERSION --event-file "$GITHUB_EVENT_PATH" --ref "$SOURCE_REF" --sha "$source_revision" --run-id "$RUNTIME_RUN_ID" --run-attempt "$RUNTIME_RUN_ATTEMPT")"
           version="$(sed -n 's/^version=//p' <<< "$version_output")"
           image_tag="$(sed -n 's/^tag=//p' <<< "$version_output")"
           [[ -n "$version" && -n "$image_tag" ]]
+          if [[ "$base_image" != "$expected_base:"*@sha256:* || ! "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo 'AI base image must include the expected package, an OCI tag, and a sha256 digest.' >&2
+            exit 1
+          fi
+          base_tag="${base_image#"$expected_base:"}"
+          base_tag="${base_tag%@sha256:*}"
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$channel" == dev ]]; then
+            dev_prefix="$version-dev.${source_revision:0:7}."
+            [[ "$base_tag" == "$dev_prefix"* ]]
+            dev_run="${base_tag#"$dev_prefix"}"
+            [[ "$dev_run" =~ ^[1-9][0-9]*\.[1-9][0-9]*$ ]]
+          elif [[ "$base_tag" != "$image_tag" ]]; then
+            echo "AI base image tag $base_tag does not match the expected release tag $image_tag." >&2
+            exit 1
+          fi
+          [[ "$classifier_image" == ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime@sha256:* && "$classifier_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$classifier_sha256" =~ ^[0-9a-f]{64}$ && "$source_revision" =~ ^[0-9a-f]{40}$ ]]
           docker buildx imagetools inspect "$base_image" --raw > /tmp/base-manifest.json
           python3 - <<'PY'
           import json
