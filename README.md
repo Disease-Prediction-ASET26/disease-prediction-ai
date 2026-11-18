@@ -275,7 +275,19 @@ container or in k3s.
 Train and review a candidate on your workstation. The release workflow never
 trains a model. It copies the exact classifier from a digest-pinned runtime
 image, checks its manifest and checksum, then builds an image for each CPU
-architecture.
+architecture. The root `VERSION` file is the AI image's stable Semantic
+Version source for both its base and model-runtime images. Use strict `X.Y.Z`
+values without a `v` prefix or build metadata. Bump it on `main` whenever a new
+production image is needed.
+
+The workflow publishes `X.Y.Z` from `main` and
+`X.Y.Z-dev.<7-character-commit>.<run-id>.<attempt>` from `develop`. Runtime
+images are deployed as
+`ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime:<tag>@sha256:<digest>`.
+The tag identifies the release; the digest pins the exact multi-platform image.
+The workflow refuses to retarget an existing tag to different content. It
+does not publish model-runtime images for pull requests; the shared AI base
+image workflow handles its own pull-request previews and cleanup.
 
 1. Commit the AI code that produced the model. Put the Kaggle CSV in the local
    `data/` directory. Do not commit the dataset or model files.
@@ -301,10 +313,10 @@ architecture.
    classifier SHA-256. Open and merge a pull request into `develop`. After CI
    passes, the release workflow uses the base image built by that exact CI run
    and the selected classifier. It builds, scans, and runs an offline
-   prediction on native AMD64 and ARM64 runners. It publishes an image index
-   and opens a GitOps pull request for the Proxmox dev deployment. The workflow
-   merges the update after GitOps validation and secret scanning pass. Argo CD
-   then deploys the image.
+   prediction on native AMD64 and ARM64 runners. It publishes a SemVer-tagged
+   image index and opens a GitOps pull request for the Proxmox dev deployment.
+   The workflow merges the update after GitOps validation and secret scanning
+   pass. Argo CD then deploys the image.
 5. After the team accepts the dev image for production, update
    `model-release-prod.json` with the accepted dev runtime image digest and
    classifier SHA-256. Merge the change into `develop`, then promote it to
@@ -314,8 +326,9 @@ architecture.
 The workflow requires a GitHub App installed on `disease-prediction-gitops`
 with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
 Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
-secrets in this repository. The classifier source image, base image, and output
-image are pinned by digest; the workflow records them in its run summary.
+secrets in this repository. The classifier source and base images are pinned by
+digest. The output image uses a SemVer tag and its verified index digest in the
+GitOps manifest; the workflow records the full reference in its run summary.
 Subsequent changes merged into `develop` or `main` rebuild the matching runtime
 with the classifier pinned for that environment. To rerun a release manually,
 select the matching branch and channel and supply the base image from that
@@ -629,23 +642,23 @@ Only load joblib files from a trusted source: they can execute code.
 
 Use this command to put an already reviewed local classifier in GHCR as a
 candidate. Run it on a native AMD64 or ARM64 host with Docker Buildx, Trivy,
-and package write access. Replace the base digest, architecture, and unique
-candidate tag with your values:
+and package write access. Replace the base digest, architecture, and valid
+SemVer prerelease tag with your values:
 
 ```sh
 docker login ghcr.io
 scripts/publish-model-runtime.sh dev \
   ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest> \
-  amd64 candidate-<unique-name> models
+  amd64 0.1.2-dev.local.1.1 models
 ```
 
 The script checks the artifact manifest, downloads pinned inference files,
 scans for fixable HIGH and CRITICAL vulnerabilities, runs a prediction without
 network access, and publishes the tested image. Record its printed digest for
 the GitHub release workflow. The workflow builds and checks both architectures
-and publishes their combined image index. Pin the resulting index digest in
-GitOps. Keep the source dataset in the ignored `data/` directory and never
-include it in the runtime image.
+and publishes their combined image index. GitOps stores the release tag and
+resulting index digest together. Keep the source dataset in the ignored
+`data/` directory and never include it in the runtime image.
 
 ---
 

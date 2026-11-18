@@ -6,9 +6,10 @@ usage() {
 Usage: scripts/publish-model-runtime.sh <dev|prod> <base-image@sha256:digest> <amd64|arm64> <image-tag> [artifact-dir]
 
 Build, scan, check offline inference, and publish one platform of a runtime image.
-Use a native host for the selected platform. The artifact directory must contain
-an already reviewed best.joblib and best.manifest.json. The CI release workflow
-combines the tested platform digests into a multi-platform image.
+Use a strict SemVer OCI tag and a native host for the selected platform. The
+artifact directory must contain an already reviewed best.joblib and
+best.manifest.json. The CI release workflow combines the tested platform
+digests into a multi-platform image.
 USAGE
 }
 
@@ -25,6 +26,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "$script_dir/.." && pwd)"
 artifact_dir="${5:-$repo_dir/models}"
 image="${AI_RUNTIME_IMAGE:-ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime}"
+model_version="${MODEL_VERSION:-$tag}"
 
 case "$channel" in
   dev) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev ;;
@@ -115,7 +117,7 @@ docker buildx build \
   --build-arg "MODEL_SOURCE_REVISION=$model_source_revision" \
   --build-arg "MODEL_TRAINING_REVISION=$model_training_revision" \
   --build-arg "MODEL_CLASSIFIER_SHA256=$model_classifier_digest" \
-  --build-arg "MODEL_VERSION=$tag" \
+  --build-arg "MODEL_VERSION=$model_version" \
   --tag "$image:$tag" \
   "$context"
 
