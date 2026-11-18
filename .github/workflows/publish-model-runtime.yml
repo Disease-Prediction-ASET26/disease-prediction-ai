@@ -51,8 +51,8 @@ concurrency:
 
 jobs:
   prepare:
-    # Local reusable workflow calls inherit the caller's push event and branch ref.
-    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') || ((github.event_name == 'push' || github.event_name == 'workflow_call') && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')) || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) }}
+    # Reusable workflow calls may retain the caller's event context; validate their source and channel below.
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') || (github.event_name == 'workflow_dispatch' && ((inputs.channel == 'dev' && github.ref == 'refs/heads/develop') || (inputs.channel == 'prod' && github.ref == 'refs/heads/main'))) || (github.event_name != 'workflow_run' && github.event_name != 'workflow_dispatch') }}
     outputs:
       channel: ${{ steps.target.outputs.channel }}
       base-image: ${{ steps.target.outputs.base-image }}
