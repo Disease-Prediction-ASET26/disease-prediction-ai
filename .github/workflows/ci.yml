@@ -177,7 +177,7 @@ jobs:
     - integration-test
     - sonarqube
     - owasp
-    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@8651d87e2c9a0dfcb55fcad9b8e9dfe9885cb75f # multi-platform publisher
+    uses: Disease-Prediction-ASET26/disease-prediction-ci/.github/workflows/container.yml@f90c52c9522b423eb183a9cf166a500ae59ef5ad # SemVer multi-platform publisher
     permissions:
       contents: read
       packages: write
@@ -186,6 +186,7 @@ jobs:
       build-artifact: ''
       dev-dockerfile: Dockerfile.dev
       production-dockerfile: Dockerfile.prod
+      version-file: VERSION
   ci:
     if: ${{ always() && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name ==
       github.repository || github.event.pull_request.base.ref == 'main') && github.event.action != 'closed') }}
