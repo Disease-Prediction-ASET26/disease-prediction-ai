@@ -310,9 +310,9 @@ image workflow handles its own pull-request previews and cleanup.
    can contain one CPU architecture: the release workflow uses it only as an
    immutable source for the classifier.
 4. Update `model-release-dev.json` with the candidate image digest and the
-   classifier SHA-256. Open and merge a pull request into `develop`. After CI
-   passes, the release workflow uses the base image built by that exact CI run
-   and the selected classifier. It builds, scans, and runs an offline
+   classifier SHA-256. Open and merge a pull request into `develop`. The
+   successful develop CI run passes its SemVer-tagged, digest-pinned base image
+   directly to the model-runtime workflow. It builds, scans, and runs an offline
    prediction on native AMD64 and ARM64 runners. It publishes a SemVer-tagged
    image index and opens a GitOps pull request for the Proxmox dev deployment.
    The workflow merges the update after GitOps validation and secret scanning
@@ -320,8 +320,9 @@ image workflow handles its own pull-request previews and cleanup.
 5. After the team accepts the dev image for production, update
    `model-release-prod.json` with the accepted dev runtime image digest and
    classifier SHA-256. Merge the change into `develop`, then promote it to
-   `main` in a pull request. After CI passes, the release workflow builds the
-   production runtime and merges its GitOps update after the checks pass.
+   `main` in a pull request. Successful CI on `main` triggers the production
+   runtime workflow, which builds the production image and merges its GitOps
+   update after the checks pass.
 
 The workflow requires a GitHub App installed on `disease-prediction-gitops`
 with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
@@ -329,13 +330,14 @@ Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
 secrets in this repository. The classifier source and base images are pinned by
 digest. The output image uses a SemVer tag and its verified index digest in the
 GitOps manifest; the workflow records the full reference in its run summary.
-Subsequent changes merged into `develop` or `main` rebuild the matching runtime
-with the classifier pinned for that environment. To rerun a release manually,
-select the matching branch and channel and supply the base image from that
-branch's current CI run. Both image architectures must match the current source
-revision. The source runtime image and classifier checksum must match the
-environment's release file. Releases for each environment run one at a
-time, and pending releases wait in a queue. A failed GitOps check leaves its
+Subsequent changes merged into `develop` rebuild the dev runtime as part of that
+CI run. Changes promoted to `main` rebuild the production runtime after main CI
+completes. Both paths use the base image from the matching CI revision. To rerun
+a release manually, select the matching branch and channel and supply the base
+image from that branch's current CI run. Both image architectures must match the
+current source revision. The source runtime image and classifier checksum must
+match the environment's release file. Releases for each environment run one at
+a time, and pending releases wait in a queue. A failed GitOps check leaves its
 pull request open for inspection. The workflow refuses to deploy an outdated
 source revision. Keep the pinned classifier source images and any images needed
 for rollback in GHCR. Deleting a pinned source prevents later releases.
