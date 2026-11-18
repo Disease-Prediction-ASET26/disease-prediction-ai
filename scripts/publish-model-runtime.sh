@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/publish-model-runtime.sh <dev|prod> <base-image@sha256:digest> <amd64|arm64> <image-tag> [artifact-dir]
+Usage: scripts/publish-model-runtime.sh <dev|prod> <base-image:semver-tag@sha256:digest> <amd64|arm64> <image-tag> [artifact-dir]
 
 Build, scan, check offline inference, and publish one platform of a runtime image.
 Use a strict SemVer OCI tag and a native host for the selected platform. The
@@ -33,9 +33,40 @@ case "$channel" in
   prod) expected_base=ghcr.io/disease-prediction-aset26/disease-prediction-ai ;;
   *) echo "Channel must be dev or prod." >&2; exit 2 ;;
 esac
-if [[ "$base_image" != "$expected_base"@sha256:* || ! "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]; then
-  echo "The $channel runtime requires a digest-pinned $expected_base base image." >&2
+if [[ "$base_image" != "$expected_base:"*@sha256:* || ! "$base_image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo "The $channel runtime requires a version-tagged and digest-pinned $expected_base base image." >&2
   exit 2
+fi
+base_tag="${base_image#"$expected_base:"}"
+base_tag="${base_tag%@sha256:*}"
+model_source_revision="$(git -C "$repo_dir" rev-parse HEAD)"
+stable_semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+dev_semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\.([0-9a-f]{7})\.[1-9][0-9]*\.[1-9][0-9]*$'
+if [[ "$channel" == prod ]]; then
+  if [[ ! "$model_version" =~ $stable_semver_re || "$base_tag" != "$model_version" ]]; then
+    echo "Production base and runtime tags must use the same stable SemVer version." >&2
+    exit 2
+  fi
+else
+  if [[ ! "$model_version" =~ $dev_semver_re ]]; then
+    echo "Development runtime version must use X.Y.Z-dev.<shortsha>.<run>.<attempt>." >&2
+    exit 2
+  fi
+  model_short_revision="${BASH_REMATCH[4]}"
+  if [[ "${model_source_revision:0:7}" != "$model_short_revision" ]]; then
+    echo "Development runtime version does not match the checked-out source revision." >&2
+    exit 2
+  fi
+  base_tag_prefix="${model_version%.*.*}"
+  if [[ "$base_tag" != "$base_tag_prefix."* ]]; then
+    echo "Development base tag does not match the runtime version and source revision." >&2
+    exit 2
+  fi
+  base_tag_run="${base_tag#"$base_tag_prefix."}"
+  if [[ ! "$base_tag_run" =~ ^[1-9][0-9]*\.[1-9][0-9]*$ ]]; then
+    echo "Development base tag must end with a run ID and attempt." >&2
+    exit 2
+  fi
 fi
 case "$arch" in
   amd64|arm64) ;;
@@ -88,7 +119,6 @@ for path in sorted(root.rglob("*.py")):
 print(digest.hexdigest())
 PY
 )"
-model_source_revision="$(git -C "$repo_dir" rev-parse HEAD)"
 model_classifier_digest="$(sha256sum "$model_path" | cut -d ' ' -f 1)"
 if [[ ! "$model_training_revision" =~ ^(local|[0-9a-f]{40,64})$ ]]; then
   echo "The model manifest has an invalid source revision." >&2
