@@ -20,8 +20,17 @@ DEFAULT_DESCRIPTION_PATH = Path("data/symptom_Description.csv")
 DEFAULT_PRECAUTION_PATH = Path("data/symptom_precaution.csv")
 
 
+# Spelling variants between the Kaggle files: the dataset and precaution CSVs
+# say "hemmorhoids" while symptom_Description.csv says "hemorrhoids". The CSVs
+# are downloaded, not versioned here, so the names are reconciled on lookup.
+_KEY_ALIASES: dict[str, str] = {
+    "dimorphic hemorrhoids(piles)": "dimorphic hemmorhoids(piles)",
+}
+
+
 def _key(disease: str) -> str:
-    return " ".join(disease.split()).strip().lower()
+    key = " ".join(disease.split()).strip().lower()
+    return _KEY_ALIASES.get(key, key)
 
 
 @dataclass

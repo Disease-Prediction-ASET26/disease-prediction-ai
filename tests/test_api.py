@@ -427,3 +427,83 @@ def test_followup_requires_confirmed_symptoms(client):
 
     assert response.status_code == 422
     assert "No confirmed symptoms" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Red flags on /predict and /predict/followup
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_for(symptoms: dict[str, str]) -> PredictionPipeline:
+    """A pipeline whose parser links each phrase to the given canonical symptom."""
+    extractor = FakeExtractor([make_entity(text) for text in symptoms])
+    linker = FakeLinker(
+        {
+            text: make_link(text, canonical, severity_weight=4)
+            for text, canonical in symptoms.items()
+        }
+    )
+    parser = SymptomParser(extractor, FakeNegationDetector(), linker)
+    return PredictionPipeline(_trained_strategy(), parser)
+
+
+def test_predict_flags_an_emergency_symptom_set(client):
+    _override(
+        _pipeline_for({"chest pain": "chest_pain", "short of breath": "breathlessness"})
+    )
+
+    response = client.post(
+        "/predict", json={"text": "chest pain and I am short of breath"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["highest_urgency"] == "EMERGENCY"
+    assert body["red_flags"][0]["name"] == "possible_cardiac_event"
+    assert "112" in body["red_flags"][0]["message"]
+    assert body["red_flags"][0]["matched_symptoms"] == ["breathlessness", "chest_pain"]
+    assert body["disclaimer"] == "This is not a medical diagnosis."
+
+
+def test_predict_flags_a_high_fever_as_urgent(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/predict", json={"text": "I have a high fever"})
+
+    body = response.json()
+    assert body["highest_urgency"] == "URGENT"
+    assert [flag["name"] for flag in body["red_flags"]] == ["high_fever"]
+
+
+def test_predict_benign_input_has_no_urgency(client):
+    _override(_fake_pipeline("itching", "itching", weight=1))
+
+    response = client.post("/predict", json={"text": "it itches"})
+
+    body = response.json()
+    assert body["highest_urgency"] is None
+    assert body["red_flags"] == []
+
+
+def test_followup_flags_confirmed_emergency_symptoms(client):
+    service = FollowUpService(
+        _ScriptedClassifier({}, default=[("Heart attack", 0.9)]),
+        _followup_index(),
+    )
+    _override_followup(service)
+    _override_knowledge(DiseaseKnowledgeBase())
+
+    response = client.post(
+        "/predict/followup",
+        json={
+            "confirmed_symptoms": ["chest_pain"],
+            "denied_symptoms": [],
+            "rounds_used": 0,
+            "answer": {"symptom": "sweating", "present": True},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["highest_urgency"] == "EMERGENCY"
+    assert body["red_flags"][0]["matched_symptoms"] == ["chest_pain", "sweating"]
