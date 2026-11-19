@@ -1,5 +1,5 @@
 # Runtime dependencies for the HTTP service and symptom parser.
-fastapi==0.162.0
+fastapi==0.162.4
 uvicorn==0.54.0
 scikit-learn==1.9.1
 pydantic==2.14.1

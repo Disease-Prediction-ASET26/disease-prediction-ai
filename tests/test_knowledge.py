@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import textwrap
 from pathlib import Path
+
+import pytest
 
 from prediction_service.knowledge import DiseaseInfo, DiseaseKnowledgeBase
 
@@ -102,3 +105,53 @@ def test_has_checks_both_lookups():
     assert kb.has("Acne") is True  # precautions only
     assert kb.has("  mAlArIa ") is True  # normalised
     assert kb.has("Unknown") is False
+
+
+def test_description_spelling_variant_resolves_to_dataset_name(tmp_path):
+    descriptions = tmp_path / "desc.csv"
+    descriptions.write_text(
+        "Disease,Description\n"
+        "Dimorphic hemorrhoids(piles),Swollen veins in the rectum.\n",
+        encoding="utf-8",
+    )
+    precautions = tmp_path / "prec.csv"
+    precautions.write_text(
+        "Disease,Precaution_1\nDimorphic hemmorhoids(piles),avoid fatty spicy food\n",
+        encoding="utf-8",
+    )
+
+    kb = DiseaseKnowledgeBase.from_csv(descriptions, precautions)
+
+    # The classifier emits the dataset spelling ("hemmorhoids").
+    assert kb.describe("Dimorphic hemmorhoids(piles)") == "Swollen veins in the rectum."
+    assert kb.precautions_for("Dimorphic hemmorhoids(piles)") == [
+        "avoid fatty spicy food"
+    ]
+
+
+_DATA = Path("data")
+
+
+@pytest.mark.skipif(
+    not all(
+        (_DATA / name).exists()
+        for name in ("dataset.csv", "symptom_Description.csv", "symptom_precaution.csv")
+    ),
+    reason="Kaggle CSVs are not bundled; download them into data/ to run this.",
+)
+def test_every_dataset_disease_has_description_and_precautions():
+    with (_DATA / "dataset.csv").open(newline="", encoding="utf-8") as handle:
+        diseases = {
+            (row.get("Disease") or "").strip()
+            for row in csv.DictReader(handle)
+            if (row.get("Disease") or "").strip()
+        }
+    kb = DiseaseKnowledgeBase.from_csv(
+        _DATA / "symptom_Description.csv", _DATA / "symptom_precaution.csv"
+    )
+
+    assert len(diseases) == 41
+    missing_description = sorted(d for d in diseases if not kb.describe(d))
+    missing_precautions = sorted(d for d in diseases if not kb.precautions_for(d))
+    assert missing_description == []
+    assert missing_precautions == []
