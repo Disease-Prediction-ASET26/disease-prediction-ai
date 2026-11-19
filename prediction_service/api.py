@@ -98,6 +98,13 @@ class FollowUpQuestionItem(BaseModel):
     )
 
 
+class RedFlagItem(BaseModel):
+    name: str
+    urgency: Urgency
+    message: str
+    matched_symptoms: list[str]
+
+
 class PredictResponse(BaseModel):
     predictions: list[PredictionItem]
     active_symptoms: list[str]
@@ -111,6 +118,15 @@ class PredictResponse(BaseModel):
         default=None,
         description="A yes/no question that would sharpen the prediction, or "
         "null when none is useful.",
+    )
+    red_flags: list[RedFlagItem] = Field(
+        default_factory=list,
+        description="Red-flag rules fired by the active symptoms, most urgent first.",
+    )
+    highest_urgency: Urgency | None = Field(
+        default=None,
+        description="Most severe urgency among red_flags: EMERGENCY = call an "
+        "ambulance (112), URGENT = see a doctor promptly; null when none fired.",
     )
 
 
@@ -194,13 +210,6 @@ class RedFlagCheckRequest(BaseModel):
         default=None,
         description="Explicit canonical symptom names (skips parsing).",
     )
-
-
-class RedFlagItem(BaseModel):
-    name: str
-    urgency: Urgency
-    message: str
-    matched_symptoms: list[str]
 
 
 class RedFlagCheckResponse(BaseModel):
@@ -333,6 +342,7 @@ def predict(
     knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
     specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
     follow_up: FollowUpService = Depends(get_follow_up_service),  # noqa: B008
+    engine: RedFlagEngine = Depends(get_red_flag_engine),  # noqa: B008
 ) -> PredictResponse:
     parse_result, predictions = pipeline.predict_detailed(request.text)
 
@@ -347,12 +357,16 @@ def predict(
     if request.top_k is not None:
         predictions = predictions[: request.top_k]
 
+    red_flags = _red_flag_items(engine, parse_result.active_symptoms())
+
     return PredictResponse(
         predictions=_to_prediction_items(predictions, knowledge, specialty),
         active_symptoms=parse_result.active_symptoms(),
         disclaimer="This is not a medical diagnosis.",
         needs_follow_up=question is not None,
         follow_up=question,
+        red_flags=red_flags,
+        highest_urgency=red_flags[0].urgency if red_flags else None,
     )
 
 
@@ -362,6 +376,7 @@ def predict_followup(
     knowledge: DiseaseKnowledgeBase = Depends(get_knowledge),  # noqa: B008
     specialty: SpecialtyMapper = Depends(get_specialty_mapper),  # noqa: B008
     follow_up: FollowUpService = Depends(get_follow_up_service),  # noqa: B008
+    engine: RedFlagEngine = Depends(get_red_flag_engine),  # noqa: B008
 ) -> PredictResponse:
     """Continue the adaptive loop after a yes/no follow-up answer.
 
@@ -408,12 +423,16 @@ def predict_followup(
         else None
     )
 
+    red_flags = _red_flag_items(engine, outcome.confirmed_symptoms)
+
     return PredictResponse(
         predictions=_to_prediction_items(predictions, knowledge, specialty),
         active_symptoms=outcome.confirmed_symptoms,
         disclaimer="This is not a medical diagnosis.",
         needs_follow_up=question is not None,
         follow_up=question,
+        red_flags=red_flags,
+        highest_urgency=red_flags[0].urgency if red_flags else None,
     )
 
 
@@ -430,6 +449,21 @@ def _first_follow_up(
         top_disease=outcome.question.top_disease,
         confidence=outcome.question.confidence,
     )
+
+
+def _red_flag_items(
+    engine: RedFlagEngine, active_symptoms: list[str]
+) -> list[RedFlagItem]:
+    """Run the red-flag rules on the active symptoms, most urgent first."""
+    return [
+        RedFlagItem(
+            name=flag.name,
+            urgency=flag.urgency,
+            message=flag.message,
+            matched_symptoms=flag.matched_symptoms,
+        )
+        for flag in engine.check(active_symptoms)
+    ]
 
 
 def _to_prediction_items(
