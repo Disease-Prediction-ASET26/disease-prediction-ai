@@ -40,6 +40,10 @@ STRATEGIES: dict[str, type[SklearnStrategy]] = {
     "naive_bayes": NaiveBayesStrategy,
 }
 
+# Committed, build-time follow-up associations asset at the repository root. It
+# is baked into runtime images and is the API's default association source.
+DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent.parent / "associations.json"
+
 
 def _accuracy(strategy: SklearnStrategy, features, labels) -> float:
     estimator = strategy._estimator
@@ -93,6 +97,7 @@ def train_all(
     calibration_method: str = "sigmoid",
     calibration_cv: int = 3,
     training_revision: str | None = None,
+    associations_path: str | Path | None = None,
 ) -> dict[str, float]:
     """Train every strategy, persist each, and return held-out accuracies.
 
@@ -148,10 +153,13 @@ def train_all(
     )
 
     # The follow-up loop picks its next question from a disease -> symptom
-    # frequency table built from the raw dataset. Bake that table beside the
-    # model so deployed images (which do not ship dataset.csv) can offer
-    # follow-up questions.
-    SymptomAssociationIndex.from_csv(data_path).save_json(out / "associations.json")
+    # frequency table built from the dataset (aggregated frequencies only).
+    # Write it as a committed, build-time asset so deployed images (which do not
+    # ship dataset.csv) can offer follow-up questions. It is baked into the
+    # runtime image from the repository root by Dockerfile.model-runtime.
+    SymptomAssociationIndex.from_csv(data_path).save_json(
+        associations_path or DEFAULT_ASSOCIATIONS_PATH
+    )
 
     return scores
 
@@ -179,6 +187,14 @@ def main() -> None:
         default=os.environ.get("GITHUB_SHA"),
         help="AI source commit used for training (defaults to GITHUB_SHA when set).",
     )
+    parser.add_argument(
+        "--associations-out",
+        default=None,
+        help=(
+            "Path for the follow-up associations.json "
+            f"(default: {DEFAULT_ASSOCIATIONS_PATH})."
+        ),
+    )
     args = parser.parse_args()
 
     scores = train_all(
@@ -187,6 +203,7 @@ def main() -> None:
         calibrate=args.calibrate,
         calibration_method=args.calibration_method,
         training_revision=args.source_revision,
+        associations_path=args.associations_out,
     )
 
     print("\nHeld-out accuracy:")

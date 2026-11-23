@@ -29,6 +29,7 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     LOG_LEVEL=debug \
     CLINICALBERT_MODEL_PATH=/app/models/clinical-ner \
     MINILM_MODEL_PATH=/app/models/minilm \
+    DISEASE_ASSOCIATIONS_PATH=/app/associations.json \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 WORKDIR /app
@@ -43,6 +44,7 @@ RUN apt-get update \
     && chown -R app:app /app/models
 COPY --from=dependencies /opt/venv /opt/venv
 COPY --chown=app:app prediction_service ./prediction_service
+COPY --chown=app:app associations.json ./associations.json
 USER 10001:10001
 EXPOSE 8000
 CMD ["sh", "-c", "exec uvicorn prediction_service.api:app --host 0.0.0.0 --port 8000 --workers 1 --log-level \"${LOG_LEVEL}\" --access-log"]
