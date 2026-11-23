@@ -4,7 +4,7 @@ uvicorn==0.54.0
 scikit-learn==1.9.1
 pydantic==2.14.1
 transformers==5.10.4
-torch==2.13.0
+torch==2.15.0
 spacy==3.7.5
 scispacy==0.5.5
 negspacy==1.0.4
