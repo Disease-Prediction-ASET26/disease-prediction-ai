@@ -513,7 +513,7 @@ def test_build_associations_prefers_baked_json(tmp_path, monkeypatch):
     from prediction_service import api
 
     frequencies = {"Flu": {"high_fever": 1.0, "cough": 1.0}}
-    artifact = tmp_path / "models" / "associations.json"
+    artifact = tmp_path / "associations.json"
     SymptomAssociationIndex.from_frequencies(frequencies).save_json(artifact)
 
     monkeypatch.setenv("DISEASE_ASSOCIATIONS_PATH", str(artifact))
@@ -528,21 +528,50 @@ def test_build_associations_prefers_baked_json(tmp_path, monkeypatch):
     assert index.symptoms_for("Flu")["high_fever"] == 1.0
 
 
-def test_build_associations_defaults_to_json_beside_model(tmp_path, monkeypatch):
+def test_build_associations_falls_back_to_dataset_csv(tmp_path, monkeypatch):
+    import textwrap
+
     from prediction_service import api
 
-    models = tmp_path / "models"
-    SymptomAssociationIndex.from_frequencies({"Flu": {"high_fever": 1.0}}).save_json(
-        models / "associations.json"
+    dataset = tmp_path / "dataset.csv"
+    dataset.write_text(
+        textwrap.dedent(
+            """
+            Disease,Symptom_1,Symptom_2
+            Flu,high_fever,cough
+            Flu,high_fever,cough
+            """
+        ).lstrip(),
+        encoding="utf-8",
     )
 
+    # Point the associations env at a missing file (from_json then yields an
+    # empty index) and the dataset env at our CSV. With an explicit missing
+    # associations path, the loader uses that path and does not fall through to
+    # the CSV -- it returns an empty index by design.
+    monkeypatch.setenv("DISEASE_ASSOCIATIONS_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("DISEASE_DATASET_PATH", str(dataset))
+    api._build_associations.cache_clear()
+    try:
+        empty = api._build_associations()
+    finally:
+        api._build_associations.cache_clear()
+    assert not empty.has("Flu")
+
+    # With no associations env and no root default present, the CSV is used.
     monkeypatch.delenv("DISEASE_ASSOCIATIONS_PATH", raising=False)
-    monkeypatch.delenv("DISEASE_DATASET_PATH", raising=False)
-    monkeypatch.setenv("DISEASE_MODEL_PATH", str(models / "best.joblib"))
+    root_default = api.Path(api.__file__).resolve().parent.parent / "associations.json"
+    real_exists = api.Path.exists
+
+    def fake_exists(self):
+        if self == root_default:
+            return False
+        return real_exists(self)
+
+    monkeypatch.setattr(api.Path, "exists", fake_exists)
     api._build_associations.cache_clear()
     try:
         index = api._build_associations()
     finally:
         api._build_associations.cache_clear()
-
     assert index.has("Flu")

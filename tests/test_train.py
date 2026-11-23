@@ -85,3 +85,49 @@ def test_calibrate_best_respects_isotonic_method():
     result = calibrate_best(base, features, labels, method="isotonic", cv=3)
     assert isinstance(result, CalibratedStrategy)
     assert result.calibration_method == "isotonic"
+
+
+# ---------------------------------------------------------------------------
+# train_all writes the follow-up associations artifact
+# ---------------------------------------------------------------------------
+
+
+def test_train_all_writes_associations_artifact(tmp_path):
+    import textwrap
+
+    from prediction_service.associations import SymptomAssociationIndex
+    from prediction_service.train import train_all
+
+    data = tmp_path / "dataset.csv"
+    data.write_text(
+        textwrap.dedent(
+            """
+            Disease,Symptom_1,Symptom_2
+            Flu,high_fever,cough
+            Flu,high_fever,cough
+            Flu,high_fever,cough
+            Flu,high_fever,cough
+            Flu,high_fever,cough
+            Common Cold,cough,continuous_sneezing
+            Common Cold,cough,continuous_sneezing
+            Common Cold,cough,continuous_sneezing
+            Common Cold,cough,continuous_sneezing
+            Common Cold,cough,continuous_sneezing
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    out = tmp_path / "models"
+    associations = tmp_path / "associations.json"
+
+    train_all(
+        data,
+        out,
+        calibrate=False,
+        associations_path=associations,
+    )
+
+    assert associations.is_file()
+    index = SymptomAssociationIndex.from_json(associations)
+    assert index.has("Flu")
+    assert index.symptoms_for("Flu")["high_fever"] == 1.0

@@ -283,15 +283,15 @@ def get_red_flag_engine() -> RedFlagEngine:
 def _build_associations() -> SymptomAssociationIndex:
     """Build the disease -> symptom association index once and cache it.
 
-    Prefers a baked ``associations.json`` artifact (how deployed images ship the
-    table, since they do not include the raw dataset), then the raw CSV, then an
-    empty index. An explicit ``DISEASE_ASSOCIATIONS_PATH`` or
-    ``DISEASE_DATASET_PATH`` overrides the defaults.
+    Loads, in order: ``DISEASE_ASSOCIATIONS_PATH``; the committed
+    ``associations.json`` at the repository/app root (the default in deployed
+    images); the raw dataset at ``DISEASE_DATASET_PATH``; then an empty index.
+    Deployed images do not ship the raw dataset, so the baked JSON is what makes
+    follow-up questions work in production.
     """
     associations_path = os.environ.get("DISEASE_ASSOCIATIONS_PATH")
     if associations_path is None:
-        model_path = Path(os.environ.get("DISEASE_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
-        default_json = model_path.with_name("associations.json")
+        default_json = Path(__file__).resolve().parent.parent / "associations.json"
         if default_json.exists():
             associations_path = str(default_json)
     if associations_path is not None:
