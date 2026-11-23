@@ -83,8 +83,13 @@ fi
 
 model_path="$artifact_dir/best.joblib"
 manifest_path="$artifact_dir/best.manifest.json"
+associations_path="$artifact_dir/associations.json"
 if [[ ! -f "$model_path" || ! -f "$manifest_path" ]]; then
   echo "Expected an approved best.joblib and best.manifest.json in $artifact_dir." >&2
+  exit 1
+fi
+if [[ ! -f "$associations_path" ]]; then
+  echo "Expected a follow-up associations.json in $artifact_dir (re-run training to generate it)." >&2
   exit 1
 fi
 PYTHONPATH="$repo_dir${PYTHONPATH:+:$PYTHONPATH}" \
@@ -134,6 +139,7 @@ cp -R "$repo_dir/prediction_service" "$context/prediction_service"
 find "$context/prediction_service" -type d -name __pycache__ -prune -exec rm -rf {} +
 cp "$model_path" "$context/best.joblib"
 cp "$manifest_path" "$context/best.manifest.json"
+cp "$associations_path" "$context/associations.json"
 
 docker buildx build \
   --platform "linux/$arch" \
@@ -164,14 +170,19 @@ trivy image \
 docker run --rm -i --network none --platform "linux/$arch" \
   --env OMP_NUM_THREADS=1 --env OPENBLAS_NUM_THREADS=1 \
   --entrypoint python "$image:$tag" - <<'PY'
-from prediction_service.api import _build_pipeline
+from prediction_service.api import _build_associations, _build_pipeline
 
 pipeline = _build_pipeline()
 pipeline.warm_up()
 parsed, predictions = pipeline.predict_detailed("I have a high fever and a cough")
 if not parsed.active_symptoms() or not predictions:
     raise SystemExit("Offline prediction smoke check returned no symptoms or predictions")
-print("Offline model readiness and prediction succeeded")
+# The follow-up loop needs the baked associations table; an empty one would
+# silently disable follow-up questions in production.
+associations = _build_associations()
+if not associations.has(predictions[0].disease_name):
+    raise SystemExit("Follow-up associations artifact is missing or empty")
+print("Offline model readiness, prediction and associations succeeded")
 PY
 
 docker push "$image:$tag"

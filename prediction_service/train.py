@@ -21,6 +21,7 @@ from collections import Counter
 from pathlib import Path
 
 from .artifact import manifest_path_for, write_model_manifest
+from .associations import SymptomAssociationIndex
 from .classifier import (
     CalibratedStrategy,
     DecisionTreeStrategy,
@@ -145,6 +146,12 @@ def train_all(
         calibration_method=calibration_method,
         training_revision=training_revision,
     )
+
+    # The follow-up loop picks its next question from a disease -> symptom
+    # frequency table built from the raw dataset. Bake that table beside the
+    # model so deployed images (which do not ship dataset.csv) can offer
+    # follow-up questions.
+    SymptomAssociationIndex.from_csv(data_path).save_json(out / "associations.json")
 
     return scores
 

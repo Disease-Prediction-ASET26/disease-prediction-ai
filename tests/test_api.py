@@ -507,3 +507,42 @@ def test_followup_flags_confirmed_emergency_symptoms(client):
     body = response.json()
     assert body["highest_urgency"] == "EMERGENCY"
     assert body["red_flags"][0]["matched_symptoms"] == ["chest_pain", "sweating"]
+
+
+def test_build_associations_prefers_baked_json(tmp_path, monkeypatch):
+    from prediction_service import api
+
+    frequencies = {"Flu": {"high_fever": 1.0, "cough": 1.0}}
+    artifact = tmp_path / "models" / "associations.json"
+    SymptomAssociationIndex.from_frequencies(frequencies).save_json(artifact)
+
+    monkeypatch.setenv("DISEASE_ASSOCIATIONS_PATH", str(artifact))
+    monkeypatch.delenv("DISEASE_DATASET_PATH", raising=False)
+    api._build_associations.cache_clear()
+    try:
+        index = api._build_associations()
+    finally:
+        api._build_associations.cache_clear()
+
+    assert index.has("Flu")
+    assert index.symptoms_for("Flu")["high_fever"] == 1.0
+
+
+def test_build_associations_defaults_to_json_beside_model(tmp_path, monkeypatch):
+    from prediction_service import api
+
+    models = tmp_path / "models"
+    SymptomAssociationIndex.from_frequencies({"Flu": {"high_fever": 1.0}}).save_json(
+        models / "associations.json"
+    )
+
+    monkeypatch.delenv("DISEASE_ASSOCIATIONS_PATH", raising=False)
+    monkeypatch.delenv("DISEASE_DATASET_PATH", raising=False)
+    monkeypatch.setenv("DISEASE_MODEL_PATH", str(models / "best.joblib"))
+    api._build_associations.cache_clear()
+    try:
+        index = api._build_associations()
+    finally:
+        api._build_associations.cache_clear()
+
+    assert index.has("Flu")

@@ -3,6 +3,8 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from prediction_service.associations import SymptomAssociationIndex
 
 
@@ -93,3 +95,32 @@ def test_next_question_unknown_disease_returns_none(tmp_path):
     index = SymptomAssociationIndex.from_csv(_dataset(tmp_path))
 
     assert index.next_question_symptom("Nonexistent") is None
+
+
+def test_json_round_trip_preserves_frequencies(tmp_path):
+    index = SymptomAssociationIndex.from_csv(_dataset(tmp_path))
+    artifact = tmp_path / "associations.json"
+    index.save_json(artifact)
+
+    reloaded = SymptomAssociationIndex.from_json(artifact)
+
+    assert reloaded.to_frequencies() == index.to_frequencies()
+    # Behaves identically to the CSV-built index.
+    candidate = reloaded.next_question_symptom("Flu", rival_disease="Common Cold")
+    assert candidate is not None
+    assert candidate.symptom == "high_fever"
+
+
+def test_from_json_missing_file_yields_empty_index(tmp_path):
+    index = SymptomAssociationIndex.from_json(tmp_path / "nope.json")
+
+    assert not index.has("Flu")
+    assert index.next_question_symptom("Flu") is None
+
+
+def test_from_json_rejects_unknown_schema(tmp_path):
+    artifact = tmp_path / "associations.json"
+    artifact.write_text('{"schema_version": 999, "frequencies": {}}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        SymptomAssociationIndex.from_json(artifact)

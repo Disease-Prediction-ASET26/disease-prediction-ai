@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -280,7 +281,22 @@ def get_red_flag_engine() -> RedFlagEngine:
 
 @lru_cache(maxsize=1)
 def _build_associations() -> SymptomAssociationIndex:
-    """Build the disease -> symptom association index once and cache it."""
+    """Build the disease -> symptom association index once and cache it.
+
+    Prefers a baked ``associations.json`` artifact (how deployed images ship the
+    table, since they do not include the raw dataset), then the raw CSV, then an
+    empty index. An explicit ``DISEASE_ASSOCIATIONS_PATH`` or
+    ``DISEASE_DATASET_PATH`` overrides the defaults.
+    """
+    associations_path = os.environ.get("DISEASE_ASSOCIATIONS_PATH")
+    if associations_path is None:
+        model_path = Path(os.environ.get("DISEASE_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
+        default_json = model_path.with_name("associations.json")
+        if default_json.exists():
+            associations_path = str(default_json)
+    if associations_path is not None:
+        return SymptomAssociationIndex.from_json(associations_path)
+
     dataset_path = os.environ.get("DISEASE_DATASET_PATH", str(DEFAULT_DATASET_PATH))
     return SymptomAssociationIndex.from_csv(dataset_path)
 
