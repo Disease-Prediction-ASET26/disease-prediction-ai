@@ -34,6 +34,7 @@ LABEL org.opencontainers.image.title="Disease Prediction AI model runtime" \
 
 ENV DISEASE_MODEL_PATH=/app/models/best.joblib \
     DISEASE_ASSOCIATIONS_PATH=/app/associations.json \
+    DISEASE_KNOWLEDGE_PATH=/app/disease_knowledge.json \
     CLINICALBERT_MODEL_PATH=/app/models/clinical-ner \
     MINILM_MODEL_PATH=/app/models/minilm \
     HF_HUB_OFFLINE=1 \
@@ -44,3 +45,4 @@ COPY --chown=10001:10001 prediction_service ./prediction_service
 COPY --chown=10001:10001 best.joblib /app/models/best.joblib
 COPY --chown=10001:10001 best.manifest.json /app/models/best.manifest.json
 COPY --chown=10001:10001 associations.json /app/associations.json
+COPY --chown=10001:10001 disease_knowledge.json /app/disease_knowledge.json

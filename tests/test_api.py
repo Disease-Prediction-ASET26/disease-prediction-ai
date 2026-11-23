@@ -575,3 +575,76 @@ def test_build_associations_falls_back_to_dataset_csv(tmp_path, monkeypatch):
     finally:
         api._build_associations.cache_clear()
     assert index.has("Flu")
+
+
+def test_build_knowledge_prefers_baked_json(tmp_path, monkeypatch):
+    from prediction_service import api
+    from prediction_service.knowledge import DiseaseKnowledgeBase
+
+    artifact = tmp_path / "disease_knowledge.json"
+    DiseaseKnowledgeBase.from_dict(
+        {
+            "descriptions": {"Fungal infection": "A skin infection."},
+            "precautions": {"Fungal infection": ["bath twice"]},
+        }
+    ).save_json(artifact)
+
+    monkeypatch.setenv("DISEASE_KNOWLEDGE_PATH", str(artifact))
+    api._build_knowledge.cache_clear()
+    try:
+        kb = api._build_knowledge()
+    finally:
+        api._build_knowledge.cache_clear()
+
+    assert kb.describe("Fungal infection") == "A skin infection."
+    assert kb.precautions_for("Fungal infection") == ["bath twice"]
+
+
+def test_build_knowledge_falls_back_to_csvs(tmp_path, monkeypatch):
+    import textwrap
+
+    from prediction_service import api
+
+    desc = tmp_path / "desc.csv"
+    desc.write_text(
+        textwrap.dedent(
+            """
+            Disease,Description
+            Malaria,A mosquito-borne disease.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    prec = tmp_path / "prec.csv"
+    prec.write_text(
+        textwrap.dedent(
+            """
+            Disease,Precaution_1
+            Malaria,consult hospital
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("DISEASE_KNOWLEDGE_PATH", raising=False)
+    monkeypatch.setenv("DISEASE_DESCRIPTION_PATH", str(desc))
+    monkeypatch.setenv("DISEASE_PRECAUTION_PATH", str(prec))
+    root_default = (
+        api.Path(api.__file__).resolve().parent.parent / "disease_knowledge.json"
+    )
+    real_exists = api.Path.exists
+
+    def fake_exists(self):
+        if self == root_default:
+            return False
+        return real_exists(self)
+
+    monkeypatch.setattr(api.Path, "exists", fake_exists)
+    api._build_knowledge.cache_clear()
+    try:
+        kb = api._build_knowledge()
+    finally:
+        api._build_knowledge.cache_clear()
+
+    assert kb.describe("Malaria") == "A mosquito-borne disease."
+    assert kb.precautions_for("Malaria") == ["consult hospital"]

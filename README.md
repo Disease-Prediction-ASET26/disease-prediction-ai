@@ -371,11 +371,18 @@ uvicorn prediction_service.api:app --reload
 Override the model path with the `DISEASE_MODEL_PATH` env var (defaults to
 `models/best.joblib`). Each prediction is enriched with the medical
 **specialty** that treats the disease, a human-readable **explanation** of the
-driving symptoms, and a description and recommended precautions loaded from
-`data/symptom_Description.csv` and `data/symptom_precaution.csv` (override paths
-with `DISEASE_DESCRIPTION_PATH` / `DISEASE_PRECAUTION_PATH`). The CSVs are
-optional — if absent, `description` is `null` and `precautions` is `[]`, and
-predictions still work.
+driving symptoms, and a description and recommended precautions.
+
+The description/precaution data is loaded, in order, from
+`DISEASE_KNOWLEDGE_PATH`; the committed `disease_knowledge.json` at the
+repository/app root (the default in deployed images, `/app/disease_knowledge.json`);
+then the raw `DISEASE_DESCRIPTION_PATH` / `DISEASE_PRECAUTION_PATH` CSVs (default
+`data/symptom_Description.csv` and `data/symptom_precaution.csv`); then an empty
+base. Deployed images do not ship the raw CSVs, so the baked JSON is what makes
+descriptions and precautions appear in production — without it, `description` is
+`null` and `precautions` is `[]` (predictions still work). Regenerate the asset
+after changing the CSVs with `python -m prediction_service.knowledge` and commit
+it.
 
 ### Endpoints
 
@@ -642,9 +649,10 @@ request in [HTTP API](#http-api) to port `18000`. Stop with Ctrl+C. To check
 `AI_BASE_IMAGE` build argument. Its asset stage downloads the exact
 ClinicalBERT and MiniLM files and revisions listed in `model-assets.json`. The
 final stage copies those files, the current Python service, `best.joblib`,
-`best.manifest.json`, and the committed root `associations.json` into the base
-image. It sets their runtime paths and Hugging Face offline mode. Build arguments
-also record the model version, checksums, and source revisions in image labels.
+`best.manifest.json`, and the committed root `associations.json` and
+`disease_knowledge.json` into the base image. It sets their runtime paths and
+Hugging Face offline mode. Build arguments also record the model version,
+checksums, and source revisions in image labels.
 
 The Dockerfile does not train a classifier. The regular `.dockerignore`
 excludes `models/` and joblib files. The Dockerfile therefore needs a separate
@@ -666,7 +674,7 @@ MODEL_CONTEXT=$(mktemp -d)
 cp Dockerfile.model-runtime model-assets.json download-model-assets.py "$MODEL_CONTEXT/"
 cp -R prediction_service "$MODEL_CONTEXT/"
 cp models/best.joblib models/best.manifest.json "$MODEL_CONTEXT/"
-cp associations.json "$MODEL_CONTEXT/"
+cp associations.json disease_knowledge.json "$MODEL_CONTEXT/"
 docker build -f "$MODEL_CONTEXT/Dockerfile.model-runtime" \
   --build-arg AI_BASE_IMAGE=disease-prediction-ai:dev \
   -t disease-prediction-ai:model-test "$MODEL_CONTEXT"

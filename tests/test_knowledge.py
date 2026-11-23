@@ -155,3 +155,58 @@ def test_every_dataset_disease_has_description_and_precautions():
     missing_precautions = sorted(d for d in diseases if not kb.precautions_for(d))
     assert missing_description == []
     assert missing_precautions == []
+
+
+def _csv_pair(tmp_path):
+    desc = _write(
+        tmp_path / "desc.csv",
+        """
+        Disease,Description
+        Fungal infection,A common skin infection.
+        Malaria,A mosquito-borne disease.
+        """,
+    )
+    prec = _write(
+        tmp_path / "prec.csv",
+        """
+        Disease,Precaution_1,Precaution_2
+        Fungal infection,bath twice,keep dry
+        Malaria,consult hospital,avoid mosquitos
+        """,
+    )
+    return desc, prec
+
+
+def test_json_round_trip_preserves_knowledge(tmp_path):
+    desc, prec = _csv_pair(tmp_path)
+    kb = DiseaseKnowledgeBase.from_csv(desc, prec)
+    artifact = tmp_path / "disease_knowledge.json"
+    kb.save_json(artifact)
+
+    reloaded = DiseaseKnowledgeBase.from_json(artifact)
+
+    assert reloaded.to_dict() == kb.to_dict()
+    assert reloaded.describe("Fungal infection") == "A common skin infection."
+    assert reloaded.precautions_for("Malaria") == [
+        "consult hospital",
+        "avoid mosquitos",
+    ]
+
+
+def test_from_json_missing_file_yields_empty_base(tmp_path):
+    kb = DiseaseKnowledgeBase.from_json(tmp_path / "nope.json")
+
+    assert not kb.has("Fungal infection")
+    assert kb.describe("Fungal infection") is None
+    assert kb.precautions_for("Fungal infection") == []
+
+
+def test_from_json_rejects_unknown_schema(tmp_path):
+    artifact = tmp_path / "disease_knowledge.json"
+    artifact.write_text(
+        '{"schema_version": 999, "descriptions": {}, "precautions": {}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        DiseaseKnowledgeBase.from_json(artifact)

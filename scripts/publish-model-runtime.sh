@@ -83,15 +83,21 @@ fi
 
 model_path="$artifact_dir/best.joblib"
 manifest_path="$artifact_dir/best.manifest.json"
-# The follow-up associations table is a committed, build-time repo asset derived
-# from the dataset (aggregated frequencies only), not a reviewed model artifact.
+# The follow-up associations table and the disease knowledge base are committed,
+# build-time repo assets derived from the dataset/CSVs, not reviewed model
+# artifacts.
 associations_path="$repo_dir/associations.json"
+knowledge_path="$repo_dir/disease_knowledge.json"
 if [[ ! -f "$model_path" || ! -f "$manifest_path" ]]; then
   echo "Expected an approved best.joblib and best.manifest.json in $artifact_dir." >&2
   exit 1
 fi
 if [[ ! -f "$associations_path" ]]; then
   echo "Expected a committed associations.json at the repository root (run 'python -m prediction_service.train' to regenerate it)." >&2
+  exit 1
+fi
+if [[ ! -f "$knowledge_path" ]]; then
+  echo "Expected a committed disease_knowledge.json at the repository root (run 'python -m prediction_service.knowledge' to regenerate it)." >&2
   exit 1
 fi
 PYTHONPATH="$repo_dir${PYTHONPATH:+:$PYTHONPATH}" \
@@ -110,6 +116,7 @@ model_build_digest="$(sha256sum \
   "$repo_dir/Dockerfile.model-runtime" \
   "$repo_dir/download-model-assets.py" \
   "$repo_dir/associations.json" \
+  "$repo_dir/disease_knowledge.json" \
   | sha256sum | cut -d ' ' -f 1)"
 model_source_digest="$(python3 - "$repo_dir/prediction_service" <<'PY'
 import hashlib
@@ -143,6 +150,7 @@ find "$context/prediction_service" -type d -name __pycache__ -prune -exec rm -rf
 cp "$model_path" "$context/best.joblib"
 cp "$manifest_path" "$context/best.manifest.json"
 cp "$associations_path" "$context/associations.json"
+cp "$knowledge_path" "$context/disease_knowledge.json"
 
 docker buildx build \
   --platform "linux/$arch" \
@@ -173,7 +181,7 @@ trivy image \
 docker run --rm -i --network none --platform "linux/$arch" \
   --env OMP_NUM_THREADS=1 --env OPENBLAS_NUM_THREADS=1 \
   --entrypoint python "$image:$tag" - <<'PY'
-from prediction_service.api import _build_associations, _build_pipeline
+from prediction_service.api import _build_associations, _build_knowledge, _build_pipeline
 
 pipeline = _build_pipeline()
 pipeline.warm_up()
@@ -185,7 +193,12 @@ if not parsed.active_symptoms() or not predictions:
 associations = _build_associations()
 if not associations.has(predictions[0].disease_name):
     raise SystemExit("Follow-up associations artifact is missing or empty")
-print("Offline model readiness, prediction and associations succeeded")
+# The knowledge base supplies descriptions/precautions; an empty one would
+# silently return null/[] in production.
+knowledge = _build_knowledge()
+if not knowledge.has(predictions[0].disease_name):
+    raise SystemExit("Disease knowledge artifact is missing or empty")
+print("Offline model readiness, prediction, associations and knowledge succeeded")
 PY
 
 docker push "$image:$tag"
