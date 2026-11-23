@@ -22,6 +22,7 @@ that difference, so each follow-up question is worth asking.
 from __future__ import annotations
 
 import csv
+import json
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from pathlib import Path
 from .vocabulary import CANONICAL_SYMPTOMS, normalise_symptom
 
 DEFAULT_DATASET_PATH = Path("data/dataset.csv")
+
+ASSOCIATIONS_SCHEMA_VERSION = 1
 
 _CANONICAL_BY_NORMALISED: dict[str, str] = {
     normalise_symptom(symptom): symptom for symptom in CANONICAL_SYMPTOMS
@@ -107,6 +110,77 @@ class SymptomAssociationIndex:
                 symptom: count / total for symptom, count in symptom_counts[key].items()
             }
         return cls(frequencies)
+
+    @classmethod
+    def from_frequencies(
+        cls, frequencies: dict[str, dict[str, float]]
+    ) -> SymptomAssociationIndex:
+        """Build an index from a precomputed per-disease frequency table.
+
+        Keys are normalised to the same disease and symptom forms the CSV path
+        produces, so an index loaded from a baked artifact behaves identically
+        to one built from ``dataset.csv``.
+        """
+        normalised: dict[str, dict[str, float]] = {}
+        for disease, symptoms in frequencies.items():
+            disease_key = _key(disease)
+            if not disease_key:
+                continue
+            bucket = normalised.setdefault(disease_key, {})
+            for symptom, frequency in symptoms.items():
+                canonical = _canonical_for(symptom)
+                if canonical is None:
+                    continue
+                bucket[canonical] = float(frequency)
+        return cls(normalised)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> SymptomAssociationIndex:
+        """Load a baked associations artifact written by :meth:`save_json`.
+
+        A missing file yields an empty index, matching :meth:`from_csv`: the
+        follow-up loop then finds no question and returns the best guess as-is.
+        """
+        source = Path(path)
+        if not source.exists():
+            return cls({})
+        document = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise TypeError(f"Invalid associations artifact: {source}")
+        schema = document.get("schema_version")
+        if schema != ASSOCIATIONS_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported associations schema: {schema}")
+        frequencies = document.get("frequencies")
+        if not isinstance(frequencies, dict):
+            raise TypeError(f"Associations artifact has no frequencies: {source}")
+        return cls.from_frequencies(frequencies)
+
+    def to_frequencies(self) -> dict[str, dict[str, float]]:
+        """Return a copy of the per-disease ``{symptom: frequency}`` table."""
+        return {
+            disease: dict(symptoms) for disease, symptoms in self._frequencies.items()
+        }
+
+    def save_json(self, path: str | Path) -> None:
+        """Write the frequency table to ``path`` as a versioned JSON artifact.
+
+        This is the deployable form of the index: baked beside the classifier so
+        the follow-up loop works in images that do not ship the raw dataset.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "schema_version": ASSOCIATIONS_SCHEMA_VERSION,
+            "frequencies": {
+                disease: dict(symptoms)
+                for disease, symptoms in sorted(self._frequencies.items())
+            },
+        }
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary.replace(target)
 
     def has(self, disease_name: str) -> bool:
         """True if the index carries symptom frequencies for the disease."""

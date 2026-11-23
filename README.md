@@ -238,6 +238,10 @@ model, refits the winners on the full dataset, and writes:
   and the artifact the API loads.
 - `models/best.manifest.json` — model version, file and dataset checksums,
   training scores, source revision, and Python/scikit-learn versions.
+- `models/associations.json` — the per-disease symptom-frequency table the
+  adaptive follow-up loop uses to pick its next question. Baked beside the model
+  so deployed images can offer follow-up questions without shipping the raw
+  dataset (see [Adaptive follow-up questions](#adaptive-follow-up-questions)).
 
 By default the best model is wrapped in `CalibratedClassifierCV` before being
 saved as `best.joblib`, so the probabilities the API returns are trustworthy.
@@ -378,6 +382,7 @@ predictions still work.
 | `GET` | `/health` | — | `{"status": "ok"}` |
 | `GET` | `/ready` | — | `{"status": "ready"}` after classifier and parser models load |
 | `POST` | `/predict` | `{"text": "...", "top_k": 5}` | ranked diseases + probability + specialty + explanation + description + precautions + active symptoms |
+| `POST` | `/predict/followup` | `{"confirmed_symptoms": [...], "denied_symptoms": [...], "answer": {"symptom": "...", "present": true}, "rounds_used": 1}` | re-ranked diseases + the next follow-up question, or the final ranking |
 | `POST` | `/map-symptoms` | `{"text": "..."}` | NLP-only: linked canonical symptoms + negated spans (no classifier) |
 | `POST` | `/red-flags/check` | `{"text": "..."}` or `{"symptoms": [...]}` | fired red-flag rules + highest urgency |
 | `GET` | `/diseases/{name}` | — | description + precautions for one disease |
@@ -463,6 +468,37 @@ curl http://localhost:8000/diseases/Malaria
 - `404` if the disease name is not in the knowledge base.
 
 Interactive docs are served at `/docs` (Swagger UI) once the app is running.
+
+### Adaptive follow-up questions
+
+When the top disease comes back below a confidence threshold (default `0.80`), a
+single prediction is not enough. `/predict` then sets `needs_follow_up: true` and
+attaches a `follow_up` yes/no question about a symptom that best separates the
+top disease from its closest rival. The client shows the question and calls
+`/predict/followup`, carrying back every symptom confirmed and denied so far plus
+the latest answer; the service re-ranks and either offers the next question or
+returns the final ranking. The service is stateless — nothing is stored between
+requests.
+
+The next question is chosen from a per-disease symptom-frequency table built from
+the training data. The API loads it, in order, from:
+
+1. `DISEASE_ASSOCIATIONS_PATH` (a baked `associations.json`);
+2. `associations.json` beside the model (`DISEASE_MODEL_PATH`), the default in
+   deployed images;
+3. the raw dataset at `DISEASE_DATASET_PATH` (default `data/dataset.csv`);
+4. an empty table, which disables follow-up questions.
+
+`train.py` writes `associations.json` into the output directory, and
+`Dockerfile.model-runtime` bakes it beside the classifier. Deployed images do not
+ship `data/dataset.csv`, so without this artifact the follow-up loop would find no
+question and `needs_follow_up` would always be `false`. Tune the loop with:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DISEASE_FOLLOWUP_THRESHOLD` | `0.80` | Confidence at or above which the loop stops asking. |
+| `DISEASE_FOLLOWUP_MAX_ROUNDS` | `5` | Hard cap on follow-up questions, guaranteeing the loop ends. |
+| `DISEASE_ASSOCIATIONS_PATH` | (beside the model) | Path to the baked `associations.json`. |
 
 ---
 
@@ -601,28 +637,30 @@ request in [HTTP API](#http-api) to port `18000`. Stop with Ctrl+C. To check
 `Dockerfile.model-runtime` takes an existing API base image through the required
 `AI_BASE_IMAGE` build argument. Its asset stage downloads the exact
 ClinicalBERT and MiniLM files and revisions listed in `model-assets.json`. The
-final stage copies those files, the current Python service, `best.joblib`, and
-`best.manifest.json` into the base image. It sets their runtime paths and
-Hugging Face offline mode. Build arguments also record the model version,
-checksums, and source revisions in image labels.
+final stage copies those files, the current Python service, `best.joblib`,
+`best.manifest.json`, and `associations.json` into the base image. It sets their
+runtime paths and Hugging Face offline mode. Build arguments also record the
+model version, checksums, and source revisions in image labels.
 
 The Dockerfile does not train a classifier. The regular `.dockerignore`
 excludes `models/` and joblib files. The Dockerfile therefore needs a separate
-build context with the reviewed classifier and manifest at its root. The
-publish script prepares this context, verifies the artifact, builds and scans
-the image, tests offline inference, and pushes the result. See
+build context with the reviewed classifier, manifest, and associations table at
+its root. The publish script prepares this context, verifies the artifact,
+builds and scans the image, tests offline inference (including that the
+follow-up associations table loaded), and pushes the result. See
 [Publish a trained model runtime](#publish-a-trained-model-runtime) for the
 release command.
 
 To build a local image without publishing, first build `disease-prediction-ai:dev`
-and prepare a reviewed classifier and manifest in `models/`. From the AI
-repository, run:
+and prepare a reviewed classifier, manifest, and `associations.json` in `models/`
+(all three are written by `prediction_service.train`). From the AI repository,
+run:
 
 ```bash
 MODEL_CONTEXT=$(mktemp -d)
 cp Dockerfile.model-runtime model-assets.json download-model-assets.py "$MODEL_CONTEXT/"
 cp -R prediction_service "$MODEL_CONTEXT/"
-cp models/best.joblib models/best.manifest.json "$MODEL_CONTEXT/"
+cp models/best.joblib models/best.manifest.json models/associations.json "$MODEL_CONTEXT/"
 docker build -f "$MODEL_CONTEXT/Dockerfile.model-runtime" \
   --build-arg AI_BASE_IMAGE=disease-prediction-ai:dev \
   -t disease-prediction-ai:model-test "$MODEL_CONTEXT"
