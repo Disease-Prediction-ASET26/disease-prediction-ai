@@ -17,7 +17,7 @@ RUN python -m venv /opt/venv \
 ENV PATH="/opt/venv/bin:${PATH}"
 COPY requirements-runtime.txt requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0 \
     && pip install -r requirements.txt \
     && pip install "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
 
