@@ -275,7 +275,19 @@ container or in k3s.
 Train and review a candidate on your workstation. The release workflow never
 trains a model. It copies the exact classifier from a digest-pinned runtime
 image, checks its manifest and checksum, then builds an image for each CPU
-architecture.
+architecture. The root `VERSION` file is the AI image's stable Semantic
+Version source for both its base and model-runtime images. Use strict `X.Y.Z`
+values without a `v` prefix or build metadata. Bump it on `main` whenever a new
+production image is needed.
+
+The workflow publishes `X.Y.Z` from `main` and
+`X.Y.Z-dev.<7-character-commit>.<run-id>.<attempt>` from `develop`. Runtime
+images are deployed as
+`ghcr.io/disease-prediction-aset26/disease-prediction-ai-runtime:<tag>@sha256:<digest>`.
+The tag identifies the release; the digest pins the exact multi-platform image.
+The workflow refuses to retarget an existing tag to different content. It
+does not publish model-runtime images for pull requests; the shared AI base
+image workflow handles its own pull-request previews and cleanup.
 
 1. Commit the AI code that produced the model. Put the Kaggle CSV in the local
    `data/` directory. Do not commit the dataset or model files.
@@ -298,31 +310,34 @@ architecture.
    can contain one CPU architecture: the release workflow uses it only as an
    immutable source for the classifier.
 4. Update `model-release-dev.json` with the candidate image digest and the
-   classifier SHA-256. Open and merge a pull request into `develop`. After CI
-   passes, the release workflow uses the base image built by that exact CI run
-   and the selected classifier. It builds, scans, and runs an offline
-   prediction on native AMD64 and ARM64 runners. It publishes an image index
-   and opens a GitOps pull request for the Proxmox dev deployment. The workflow
-   merges the update after GitOps validation and secret scanning pass. Argo CD
-   then deploys the image.
+   classifier SHA-256. Open and merge a pull request into `develop`. The
+   successful develop CI run passes its SemVer-tagged, digest-pinned base image
+   directly to the model-runtime workflow. It builds, scans, and runs an offline
+   prediction on native AMD64 and ARM64 runners. It publishes a SemVer-tagged
+   image index and opens a GitOps pull request for the Proxmox dev deployment.
+   The workflow merges the update after GitOps validation and secret scanning
+   pass. Argo CD then deploys the image.
 5. After the team accepts the dev image for production, update
    `model-release-prod.json` with the accepted dev runtime image digest and
    classifier SHA-256. Merge the change into `develop`, then promote it to
-   `main` in a pull request. After CI passes, the release workflow builds the
-   production runtime and merges its GitOps update after the checks pass.
+   `main` in a pull request. Successful CI on `main` triggers the production
+   runtime workflow, which builds the production image and merges its GitOps
+   update after the checks pass.
 
 The workflow requires a GitHub App installed on `disease-prediction-gitops`
 with Contents and Pull requests write access. Set `GITOPS_CLIENT_ID` to the app
 Client ID and `GITOPS_APP_PRIVATE_KEY` to its complete PEM key as Actions
-secrets in this repository. The classifier source image, base image, and output
-image are pinned by digest; the workflow records them in its run summary.
-Subsequent changes merged into `develop` or `main` rebuild the matching runtime
-with the classifier pinned for that environment. To rerun a release manually,
-select the matching branch and channel and supply the base image from that
-branch's current CI run. Both image architectures must match the current source
-revision. The source runtime image and classifier checksum must match the
-environment's release file. Releases for each environment run one at a
-time, and pending releases wait in a queue. A failed GitOps check leaves its
+secrets in this repository. The classifier source and base images are pinned by
+digest. The output image uses a SemVer tag and its verified index digest in the
+GitOps manifest; the workflow records the full reference in its run summary.
+Subsequent changes merged into `develop` rebuild the dev runtime as part of that
+CI run. Changes promoted to `main` rebuild the production runtime after main CI
+completes. Both paths use the base image from the matching CI revision. To rerun
+a release manually, select the matching branch and channel and supply the base
+image from that branch's current CI run. Both image architectures must match the
+current source revision. The source runtime image and classifier checksum must
+match the environment's release file. Releases for each environment run one at
+a time, and pending releases wait in a queue. A failed GitOps check leaves its
 pull request open for inspection. The workflow refuses to deploy an outdated
 source revision. Keep the pinned classifier source images and any images needed
 for rollback in GHCR. Deleting a pinned source prevents later releases.
@@ -490,48 +505,168 @@ checksum in the classifier manifest.
 
 ## Docker images
 
-The shared Compose setup is in
-[`disease-prediction-docker`](../disease-prediction-docker). It uses
-`Dockerfile.local` for the source-mounted developer service,
-`Dockerfile.dev` for a deployable dev image, and `Dockerfile.prod` for the
-production runtime image. Each build excludes the local `data/` and `models/`
-folders. The runtime images use CPU-only PyTorch. The published model runtime
-adds the pinned inference weights to the image.
+Run the commands below from the AI repository unless a step names another
+repository. Builds need Docker and network access to download dependencies.
+The model downloads and images need several gigabytes of disk space.
 
-The API can start without a trained classifier, but `/predict` returns `503`
-until `models/best.joblib` is present at the configured model path. `/ready`
-returns success only after the classifier and manifest have been verified and
-loaded, and the parser models have been loaded. `/health` remains a process
-check. The published runtime image loads the parser models from local files in
-offline mode. A pod cannot receive prediction traffic until this completes.
+| File | Purpose | Model files |
+| --- | --- | --- |
+| `Dockerfile.local` | Development server, training, and Python tests. Uses Uvicorn reload. | Mount the classifier. Parser models can download on first use. |
+| `Dockerfile.dev` | Non-root dev API image with debug logging. | Supply the classifier and parser models separately. |
+| `Dockerfile.prod` | Non-root production base API image with info logging. | Supply the classifier and parser models separately. |
+| `Dockerfile.model-runtime` | Add a reviewed classifier and pinned parser models to a dev or production base image. | Included in the resulting image. |
+
+All images expose port `8000`. The dev and production base images run in
+Hugging Face offline mode and expect parser files at `/app/models/clinical-ner`
+and `/app/models/minilm`. A base image alone does not contain those files or
+the classifier. The model runtime includes them and starts offline.
+
+### Run the full stack
+
+Follow the [shared Docker setup](https://github.com/Disease-Prediction-ASET26/disease-prediction-docker)
+for the sibling repositories and local secrets. Put `best.joblib` and its
+`best.manifest.json` in this repository's `models/` directory. To train a local
+classifier, see [Model training and release](#model-training-and-release).
+
+From `disease-prediction-docker`, start the local profile:
+
+```bash
+docker compose --profile local up --build
+```
+
+The API is at `http://localhost:8000`. The local profile mounts the source,
+`models/`, and `data/`. It keeps downloaded Hugging Face files in a Docker
+volume. Run the Python tests in another terminal:
+
+```bash
+docker compose exec ai-local python -m pytest tests
+```
+
+For the dev or production base image profiles, first download the pinned parser
+models into the AI repository's `models/` directory. From that repository, use
+an active Python virtual environment:
+
+```bash
+python -m pip install huggingface-hub==1.6.0
+python download-model-assets.py models
+```
+
+The script uses `model-assets.json` and creates `models/clinical-ner` and
+`models/minilm`. Then, from `disease-prediction-docker`, run one profile:
+
+```bash
+docker compose --profile dev up --build
+# Or:
+docker compose --profile prod up --build
+```
+
+The AI ports are `18000` for dev and `28000` for production. Compose mounts
+`models/` read-only; it does not build `Dockerfile.model-runtime`. Run
+`docker compose --profile local down` to stop the local stack; use the matching
+profile for the other stacks. Data and model files are kept.
+
+### Build and check a base image
+
+From the AI repository, build the image you need:
+
+```bash
+docker build -f Dockerfile.local -t disease-prediction-ai:local .
+docker build -f Dockerfile.dev -t disease-prediction-ai:dev .
+docker build -f Dockerfile.prod -t disease-prediction-ai:prod .
+```
+
+The local image includes test dependencies. To run the tests in it:
+
+```bash
+docker run --rm disease-prediction-ai:local python -m pytest tests
+```
+
+For the dev image, prepare `models/best.joblib`, `models/best.manifest.json`,
+`models/clinical-ner`, and `models/minilm` as described above. Then run:
+
+```bash
+docker run --rm --name ai-check \
+  -v "$PWD/models:/app/models:ro" \
+  -p 127.0.0.1:18000:8000 disease-prediction-ai:dev
+```
+
+In another terminal, check `curl --fail http://localhost:18000/ready`. Model
+loading can take time. `/health` only checks the process; `/ready` loads the
+classifier and parser and reports whether predictions can run. Send the sample
+request in [HTTP API](#http-api) to port `18000`. Stop with Ctrl+C. To check
+`Dockerfile.prod`, use its image and a free host port instead.
+
+### How the model runtime is built
+
+`Dockerfile.model-runtime` takes an existing API base image through the required
+`AI_BASE_IMAGE` build argument. Its asset stage downloads the exact
+ClinicalBERT and MiniLM files and revisions listed in `model-assets.json`. The
+final stage copies those files, the current Python service, `best.joblib`, and
+`best.manifest.json` into the base image. It sets their runtime paths and
+Hugging Face offline mode. Build arguments also record the model version,
+checksums, and source revisions in image labels.
+
+The Dockerfile does not train a classifier. The regular `.dockerignore`
+excludes `models/` and joblib files. The Dockerfile therefore needs a separate
+build context with the reviewed classifier and manifest at its root. The
+publish script prepares this context, verifies the artifact, builds and scans
+the image, tests offline inference, and pushes the result. See
+[Publish a trained model runtime](#publish-a-trained-model-runtime) for the
+release command.
+
+To build a local image without publishing, first build `disease-prediction-ai:dev`
+and prepare a reviewed classifier and manifest in `models/`. From the AI
+repository, run:
+
+```bash
+MODEL_CONTEXT=$(mktemp -d)
+cp Dockerfile.model-runtime model-assets.json download-model-assets.py "$MODEL_CONTEXT/"
+cp -R prediction_service "$MODEL_CONTEXT/"
+cp models/best.joblib models/best.manifest.json "$MODEL_CONTEXT/"
+docker build -f "$MODEL_CONTEXT/Dockerfile.model-runtime" \
+  --build-arg AI_BASE_IMAGE=disease-prediction-ai:dev \
+  -t disease-prediction-ai:model-test "$MODEL_CONTEXT"
+```
+
+Start and check it without mounting model files:
+
+```bash
+docker run --rm --name ai-model-check \
+  -p 127.0.0.1:18000:8000 disease-prediction-ai:model-test
+```
+
+Check `http://localhost:18000/ready` after startup. Stop with Ctrl+C and remove
+the temporary context with `rm -r -- "$MODEL_CONTEXT"`. This local build is
+for testing; use the publish script and release workflow for reviewed images.
+Only load joblib files from a trusted source: they can execute code.
 
 ### Publish a trained model runtime
 
 Use this command to put an already reviewed local classifier in GHCR as a
 candidate. Run it on a native AMD64 or ARM64 host with Docker Buildx, Trivy,
-and package write access. Replace the base digest, architecture, and unique
-candidate tag with your values:
+and package write access. Replace the base tag and digest, architecture, and
+run metadata with values from a successful build of the same source revision:
 
 ```sh
 docker login ghcr.io
+MODEL_VERSION=0.1.2-dev.<short-sha>.<run-id>.<attempt> \
 scripts/publish-model-runtime.sh dev \
-  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev@sha256:<base-digest> \
-  amd64 candidate-<unique-name> models
+  ghcr.io/disease-prediction-aset26/disease-prediction-ai-dev:0.1.2-dev.<short-sha>.<run-id>.<attempt>@sha256:<base-digest> \
+  amd64 stage-<run-id>-amd64 models
 ```
+
+The base reference includes its SemVer tag and digest. `MODEL_VERSION` must
+match the checked-out source revision and the base image tag. For a manual
+runtime build, the base image may come from an earlier run for that same
+revision.
 
 The script checks the artifact manifest, downloads pinned inference files,
 scans for fixable HIGH and CRITICAL vulnerabilities, runs a prediction without
 network access, and publishes the tested image. Record its printed digest for
 the GitHub release workflow. The workflow builds and checks both architectures
-and publishes their combined image index. Pin the resulting index digest in
-GitOps. Keep the source dataset in the ignored `data/` directory and never
-include it in the runtime image. Joblib files can execute code while loading,
-so package only artifacts trained and reviewed by the project team.
-
-The published model runtime contains the classifier and both pinned NLP model
-directories. It does not need a Hugging Face cache volume or Hub network access
-at startup. The model revisions and files included in the image are listed in
-`model-assets.json`.
+and publishes their combined image index. GitOps stores the release tag and
+resulting index digest together. Keep the source dataset in the ignored
+`data/` directory and never include it in the runtime image.
 
 ---
 

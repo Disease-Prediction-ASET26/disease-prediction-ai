@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import pytest
 from fastapi.testclient import TestClient
 
-from prediction_service.api import app, get_knowledge, get_pipeline
+from prediction_service.api import (
+    app,
+    get_associations,
+    get_follow_up_service,
+    get_knowledge,
+    get_pipeline,
+)
+from prediction_service.associations import SymptomAssociationIndex
 from prediction_service.classifier import RandomForestStrategy
 from prediction_service.features import encode_entries
+from prediction_service.followup import FollowUpService
 from prediction_service.knowledge import DiseaseKnowledgeBase
-from prediction_service.models import Severity, SymptomEntryDTO
+from prediction_service.models import DiseasePrediction, Severity, SymptomEntryDTO
 from prediction_service.parser import SymptomParser
 from prediction_service.pipeline import PredictionPipeline
 
@@ -281,3 +291,219 @@ def test_red_flags_check_requires_input(client):
 
     assert response.status_code == 422
     assert "Provide either" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Adaptive follow-up questions (/predict low-confidence hint + /predict/followup)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ScriptedClassifier:
+    by_entry_count: dict[int, list[tuple[str, float]]]
+    default: list[tuple[str, float]] = field(default_factory=list)
+
+    def predict(self, entries) -> list[DiseasePrediction]:
+        ranking = self.by_entry_count.get(len(entries), self.default)
+        return [
+            DiseasePrediction(rank=i, probability=p, disease_name=name)
+            for i, (name, p) in enumerate(ranking, start=1)
+        ]
+
+
+def _followup_index() -> SymptomAssociationIndex:
+    return SymptomAssociationIndex(
+        {
+            "flu": {"cough": 1.0, "high_fever": 1.0, "chills": 0.8},
+            "common cold": {"cough": 1.0, "continuous_sneezing": 0.6},
+        }
+    )
+
+
+def _override_followup(service: FollowUpService) -> None:
+    app.dependency_overrides[get_follow_up_service] = lambda: service
+    # Keep get_associations harmless if anything else resolves it.
+    app.dependency_overrides[get_associations] = _followup_index
+
+
+def test_predict_attaches_follow_up_when_confidence_low(client):
+    # Pipeline parses one real symptom ("cough"); the scripted follow-up service
+    # makes the top disease (Flu) land below the 0.80 threshold.
+    _override(_fake_pipeline("cough", "cough", weight=4))
+    service = FollowUpService(
+        _ScriptedClassifier({1: [("Flu", 0.55), ("Common Cold", 0.40)]}),
+        _followup_index(),
+    )
+    _override_followup(service)
+
+    response = client.post("/predict", json={"text": "I have a cough"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["needs_follow_up"] is True
+    assert body["follow_up"]["symptom"] == "high_fever"
+    assert body["follow_up"]["question"] == "Do you also have high fever?"
+    assert body["follow_up"]["top_disease"] == "Flu"
+
+
+def test_predict_omits_follow_up_when_confident(client):
+    _override(_fake_pipeline("cough", "cough", weight=4))
+    service = FollowUpService(
+        _ScriptedClassifier({1: [("Flu", 0.95), ("Common Cold", 0.02)]}),
+        _followup_index(),
+    )
+    _override_followup(service)
+
+    response = client.post("/predict", json={"text": "I have a cough"})
+
+    body = response.json()
+    assert body["needs_follow_up"] is False
+    assert body["follow_up"] is None
+
+
+def test_followup_yes_answer_raises_confidence(client):
+    # 1 confirmed -> vague; 2 confirmed (after yes) -> confident.
+    service = FollowUpService(
+        _ScriptedClassifier(
+            {
+                1: [("Flu", 0.55), ("Common Cold", 0.40)],
+                2: [("Flu", 0.90), ("Common Cold", 0.05)],
+            }
+        ),
+        _followup_index(),
+    )
+    _override_followup(service)
+
+    response = client.post(
+        "/predict/followup",
+        json={
+            "confirmed_symptoms": ["cough"],
+            "denied_symptoms": [],
+            "answer": {"symptom": "high_fever", "present": True},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["needs_follow_up"] is False
+    assert body["follow_up"] is None
+    assert body["predictions"][0]["disease_name"] == "Flu"
+    assert "high_fever" in body["active_symptoms"]
+
+
+def test_followup_no_answer_asks_a_different_symptom(client):
+    service = FollowUpService(
+        _ScriptedClassifier({1: [("Flu", 0.55), ("Common Cold", 0.40)]}),
+        _followup_index(),
+    )
+    _override_followup(service)
+
+    response = client.post(
+        "/predict/followup",
+        json={
+            "confirmed_symptoms": ["cough"],
+            "denied_symptoms": [],
+            "answer": {"symptom": "high_fever", "present": False},
+        },
+    )
+
+    body = response.json()
+    assert body["needs_follow_up"] is True
+    # high_fever denied this turn -> next best is chills.
+    assert body["follow_up"]["symptom"] == "chills"
+
+
+def test_followup_requires_confirmed_symptoms(client):
+    service = FollowUpService(
+        _ScriptedClassifier({1: [("Flu", 0.55)]}),
+        _followup_index(),
+    )
+    _override_followup(service)
+
+    response = client.post(
+        "/predict/followup",
+        json={"confirmed_symptoms": [], "denied_symptoms": []},
+    )
+
+    assert response.status_code == 422
+    assert "No confirmed symptoms" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Red flags on /predict and /predict/followup
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_for(symptoms: dict[str, str]) -> PredictionPipeline:
+    """A pipeline whose parser links each phrase to the given canonical symptom."""
+    extractor = FakeExtractor([make_entity(text) for text in symptoms])
+    linker = FakeLinker(
+        {
+            text: make_link(text, canonical, severity_weight=4)
+            for text, canonical in symptoms.items()
+        }
+    )
+    parser = SymptomParser(extractor, FakeNegationDetector(), linker)
+    return PredictionPipeline(_trained_strategy(), parser)
+
+
+def test_predict_flags_an_emergency_symptom_set(client):
+    _override(
+        _pipeline_for({"chest pain": "chest_pain", "short of breath": "breathlessness"})
+    )
+
+    response = client.post(
+        "/predict", json={"text": "chest pain and I am short of breath"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["highest_urgency"] == "EMERGENCY"
+    assert body["red_flags"][0]["name"] == "possible_cardiac_event"
+    assert "112" in body["red_flags"][0]["message"]
+    assert body["red_flags"][0]["matched_symptoms"] == ["breathlessness", "chest_pain"]
+    assert body["disclaimer"] == "This is not a medical diagnosis."
+
+
+def test_predict_flags_a_high_fever_as_urgent(client):
+    _override(_fake_pipeline("high fever", "high_fever", weight=7))
+
+    response = client.post("/predict", json={"text": "I have a high fever"})
+
+    body = response.json()
+    assert body["highest_urgency"] == "URGENT"
+    assert [flag["name"] for flag in body["red_flags"]] == ["high_fever"]
+
+
+def test_predict_benign_input_has_no_urgency(client):
+    _override(_fake_pipeline("itching", "itching", weight=1))
+
+    response = client.post("/predict", json={"text": "it itches"})
+
+    body = response.json()
+    assert body["highest_urgency"] is None
+    assert body["red_flags"] == []
+
+
+def test_followup_flags_confirmed_emergency_symptoms(client):
+    service = FollowUpService(
+        _ScriptedClassifier({}, default=[("Heart attack", 0.9)]),
+        _followup_index(),
+    )
+    _override_followup(service)
+    _override_knowledge(DiseaseKnowledgeBase())
+
+    response = client.post(
+        "/predict/followup",
+        json={
+            "confirmed_symptoms": ["chest_pain"],
+            "denied_symptoms": [],
+            "rounds_used": 0,
+            "answer": {"symptom": "sweating", "present": True},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["highest_urgency"] == "EMERGENCY"
+    assert body["red_flags"][0]["matched_symptoms"] == ["chest_pain", "sweating"]
