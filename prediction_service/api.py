@@ -234,7 +234,23 @@ def _build_pipeline() -> PredictionPipeline:
 
 @lru_cache(maxsize=1)
 def _build_knowledge() -> DiseaseKnowledgeBase:
-    """Load description/precaution CSVs once (empty KB if files are absent)."""
+    """Load the disease description/precaution knowledge base once and cache it.
+
+    Loads, in order: ``DISEASE_KNOWLEDGE_PATH``; the committed
+    ``disease_knowledge.json`` at the repository/app root (the default in
+    deployed images); the raw ``DISEASE_DESCRIPTION_PATH`` /
+    ``DISEASE_PRECAUTION_PATH`` CSVs; then an empty base. Deployed images do not
+    ship the raw CSVs, so the baked JSON is what makes descriptions and
+    precautions appear in production.
+    """
+    knowledge_path = os.environ.get("DISEASE_KNOWLEDGE_PATH")
+    if knowledge_path is None:
+        default_json = Path(__file__).resolve().parent.parent / "disease_knowledge.json"
+        if default_json.exists():
+            knowledge_path = str(default_json)
+    if knowledge_path is not None:
+        return DiseaseKnowledgeBase.from_json(knowledge_path)
+
     description_path = os.environ.get(
         "DISEASE_DESCRIPTION_PATH", str(DEFAULT_DESCRIPTION_PATH)
     )
