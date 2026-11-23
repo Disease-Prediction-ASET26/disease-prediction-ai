@@ -5,7 +5,7 @@ scikit-learn==1.9.1
 pydantic==2.14.1
 transformers==5.10.4
 torch==2.15.0
-spacy==3.7.5
+spacy==3.8.18
 scispacy==0.5.5
 negspacy==1.0.4
 sentence-transformers==6.3.0
