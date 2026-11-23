@@ -83,13 +83,15 @@ fi
 
 model_path="$artifact_dir/best.joblib"
 manifest_path="$artifact_dir/best.manifest.json"
-associations_path="$artifact_dir/associations.json"
+# The follow-up associations table is a committed, build-time repo asset derived
+# from the dataset (aggregated frequencies only), not a reviewed model artifact.
+associations_path="$repo_dir/associations.json"
 if [[ ! -f "$model_path" || ! -f "$manifest_path" ]]; then
   echo "Expected an approved best.joblib and best.manifest.json in $artifact_dir." >&2
   exit 1
 fi
 if [[ ! -f "$associations_path" ]]; then
-  echo "Expected a follow-up associations.json in $artifact_dir (re-run training to generate it)." >&2
+  echo "Expected a committed associations.json at the repository root (run 'python -m prediction_service.train' to regenerate it)." >&2
   exit 1
 fi
 PYTHONPATH="$repo_dir${PYTHONPATH:+:$PYTHONPATH}" \
@@ -107,6 +109,7 @@ PY
 model_build_digest="$(sha256sum \
   "$repo_dir/Dockerfile.model-runtime" \
   "$repo_dir/download-model-assets.py" \
+  "$repo_dir/associations.json" \
   | sha256sum | cut -d ' ' -f 1)"
 model_source_digest="$(python3 - "$repo_dir/prediction_service" <<'PY'
 import hashlib
